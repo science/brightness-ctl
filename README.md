@@ -1,0 +1,59 @@
+# redshift-ctl
+
+Color temperature and brightness daemon for X11/Cinnamon desktops.
+
+## What it does
+
+- **Color temperature**: automatic time-based transitions (dawn/dusk ramps) with manual warmer/cooler hotkey adjustment
+- **Software brightness**: via `gammastep` one-shot mode (fast, GPU-based)
+- **Hardware brightness**: via `ddcutil` DDC/CI (controls monitor backlight)
+- **Ambient light**: USB camera reads room brightness and auto-adjusts (optional)
+- **Hotkey response**: <50ms via Unix socket IPC to persistent daemon
+
+## Requirements
+
+- Python 3.12+
+- `gammastep`, `ddcutil`, `libnotify-bin` (system packages)
+- X11 with RandR (Cinnamon, MATE, etc.)
+
+## Install
+
+```bash
+./install.sh
+```
+
+This symlinks `redshift-ctl` to `~/.local/bin/` and installs a systemd user service.
+
+## Usage
+
+```bash
+redshift-ctl daemon          # Start daemon (or use systemd)
+redshift-ctl warmer          # Shift color warmer by 200K
+redshift-ctl cooler          # Shift color cooler by 200K
+redshift-ctl toggle          # Toggle redshift on/off
+redshift-ctl reset           # Reset color offset to zero
+redshift-ctl bright-up       # Increase brightness (SW first, then HW)
+redshift-ctl bright-down     # Decrease brightness (HW first, then SW)
+redshift-ctl status          # Show current state
+redshift-ctl stop            # Stop daemon
+```
+
+## Hotkeys (Cinnamon)
+
+| Key | Action |
+|-----|--------|
+| Alt+KP_Add | Warmer |
+| Alt+KP_Subtract | Cooler |
+| Alt+End | Toggle |
+| Alt+Page_Up | Brightness up |
+| Alt+Page_Down | Brightness down |
+
+## Development
+
+```bash
+pytest tests/ -v             # Run all tests
+pytest tests/ -v -x          # Stop on first failure
+```
+
+See [CLAUDE.md](CLAUDE.md) for development methodology (TDD red/green) and architecture details.
+See [PLAN.md](PLAN.md) for implementation plan and design decisions.
