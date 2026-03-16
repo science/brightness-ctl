@@ -1,4 +1,4 @@
-# redshift-ctl
+# brightness-ctl
 
 Color temperature and brightness daemon for X11/Cinnamon desktops.
 
@@ -22,20 +22,20 @@ Color temperature and brightness daemon for X11/Cinnamon desktops.
 ./install.sh
 ```
 
-This symlinks `redshift-ctl` to `~/.local/bin/` and installs a systemd user service.
+This symlinks `brightness-ctl` to `~/.local/bin/` and installs a systemd user service.
 
 ## Usage
 
 ```bash
-redshift-ctl daemon          # Start daemon (or use systemd)
-redshift-ctl warmer          # Shift color warmer by 200K
-redshift-ctl cooler          # Shift color cooler by 200K
-redshift-ctl toggle          # Toggle redshift on/off
-redshift-ctl reset           # Reset color offset to zero
-redshift-ctl bright-up       # Increase brightness (SW first, then HW)
-redshift-ctl bright-down     # Decrease brightness (HW first, then SW)
-redshift-ctl status          # Show current state
-redshift-ctl stop            # Stop daemon
+brightness-ctl daemon          # Start daemon (or use systemd)
+brightness-ctl warmer          # Shift color warmer by 200K
+brightness-ctl cooler          # Shift color cooler by 200K
+brightness-ctl toggle          # Toggle color shift on/off
+brightness-ctl reset           # Reset color offset to zero
+brightness-ctl bright-up       # Increase brightness (SW first, then HW)
+brightness-ctl bright-down     # Decrease brightness (HW first, then SW)
+brightness-ctl status          # Show current state
+brightness-ctl stop            # Stop daemon
 ```
 
 ## Hotkeys (Cinnamon)

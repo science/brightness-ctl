@@ -10,7 +10,7 @@ Color temperature and brightness daemon for X11/Cinnamon desktops. Manages softw
 
 ```
 src/
-  redshift-ctl            # Entry point (#!/usr/bin/env python3) — daemon or CLI
+  brightness-ctl            # Entry point (#!/usr/bin/env python3) — daemon or CLI
   daemon.py               # asyncio loop: socket server, periodic apply, ambient light
   color_temp.py           # get_base_temp(hour, minute, config) -> int (pure math)
   brightness.py           # bright_up/down state machine (pure logic)
@@ -79,16 +79,16 @@ Tests require only `python3-pytest` and optionally `python3-pytest-asyncio` for 
 ### Daemon (asyncio single-thread)
 
 The daemon runs as a single asyncio event loop:
-- **Unix socket server** at `$XDG_RUNTIME_DIR/redshift-ctl.sock` — handles CLI commands
+- **Unix socket server** at `$XDG_RUNTIME_DIR/brightness-ctl.sock` — handles CLI commands
 - **Periodic apply** every 30s — time-based color temperature transitions
 - **Debounce** — 100ms coalesce window after state changes before applying
 - **Ambient light task** — reads camera every 60s, proposes brightness adjustments
 
-All state lives in memory; written to `~/.config/redshift-ctl/state.json` on mutation for crash recovery. Single-threaded asyncio means no locking needed.
+All state lives in memory; written to `~/.config/brightness-ctl/state.json` on mutation for crash recovery. Single-threaded asyncio means no locking needed.
 
 ### CLI (socket client)
 
-Hotkey presses invoke `redshift-ctl warmer` etc. The entry point connects to the daemon socket, sends a JSON command, reads the response, and exits. Latency target: <50ms total.
+Hotkey presses invoke `brightness-ctl warmer` etc. The entry point connects to the daemon socket, sends a JSON command, reads the response, and exits. Latency target: <50ms total.
 
 ### Hardware Backend
 
@@ -128,9 +128,9 @@ All external tool calls go through a `HardwareBackend` protocol:
 - `python3-pytest-asyncio` (for async daemon tests)
 
 ### Config & State
-- Config: `~/.config/redshift-ctl/config.toml` (TOML, read via stdlib `tomllib`)
-- State: `~/.config/redshift-ctl/state.json` (JSON, atomic write via `os.rename`)
-- Socket: `$XDG_RUNTIME_DIR/redshift-ctl.sock`
+- Config: `~/.config/brightness-ctl/config.toml` (TOML, read via stdlib `tomllib`)
+- State: `~/.config/brightness-ctl/state.json` (JSON, atomic write via `os.rename`)
+- Socket: `$XDG_RUNTIME_DIR/brightness-ctl.sock`
 
 ## Install / Uninstall
 

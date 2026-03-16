@@ -1,4 +1,4 @@
-# Plan: Extract redshift-ctl into ~/dev project and rewrite as Python daemon
+# Plan: Extract redshift-ctl bash script into ~/dev project and rewrite as Python daemon (brightness-ctl)
 
 ## Context
 
@@ -11,14 +11,14 @@ Unlike pam-fprintd-sudo (which can lock you out), worst case here is neutral 650
 ## Project Structure
 
 ```
-~/dev/redshift-ctl/
+~/dev/brightness-ctl/
   CLAUDE.md                 # Project rules and architecture
   README.md
   PLAN.md
   install.sh                # Symlinks, systemd service, config migration
   uninstall.sh
   src/
-    redshift-ctl            # Entry point (#!/usr/bin/env python3) — daemon or CLI
+    brightness-ctl            # Entry point (#!/usr/bin/env python3) — daemon or CLI
     daemon.py               # asyncio loop: socket server, periodic apply, ambient light
     color_temp.py           # get_base_temp(hour, minute, config) -> int (pure math)
     brightness.py           # bright_up/down state machine (pure logic)
@@ -46,7 +46,7 @@ Unlike pam-fprintd-sudo (which can lock you out), worst case here is neutral 650
 |----------|--------|-----------|
 | Language | Python 3.12 | stdlib asyncio, tomllib, struct/fcntl for V4L2 — no pip deps at runtime |
 | Daemon arch | asyncio single-thread | Socket server + periodic timers + sequential DDC/CI without threads |
-| IPC | Unix domain socket (`$XDG_RUNTIME_DIR/redshift-ctl.sock`) | Bidirectional, asyncio-native, sub-ms latency |
+| IPC | Unix domain socket (`$XDG_RUNTIME_DIR/brightness-ctl.sock`) | Bidirectional, asyncio-native, sub-ms latency |
 | Config format | TOML | stdlib `tomllib` in 3.12; install.sh auto-migrates old bash config |
 | Camera capture | Raw V4L2 ioctls (ctypes/fcntl/mmap) | Confirmed working on Alcor 058f:5608 at /dev/video2; avoids 500MB OpenCV |
 | DDC/CI | Sequential `await` per monitor | Fixes I2C bus contention; cache `ddcutil detect` at daemon startup |
@@ -72,7 +72,7 @@ Unlike pam-fprintd-sudo (which can lock you out), worst case here is neutral 650
 |-----|-----------|-----|
 | **Slow hotkeys** (500-2000ms) | Shell spawn + `bc -l` + blocking `gammastep -P -O` per keypress | CLI sends JSON over socket (~1ms). Daemon holds state in memory, applies async. |
 | **Inconsistent monitors** | Parallel `ddcutil setvcp &` causes I2C bus contention | Sequential `await` loop. Cache display list at startup (re-detect on SIGHUP). |
-| **Redshift off on brightness change** | `gammastep -P` resets all state; daemon apply() races hotkey apply() | Single daemon owns all applies. 100ms debounce coalesces rapid commands. One apply at a time (asyncio single-thread). |
+| **Color temp reset on brightness change** | `gammastep -P` resets all state; daemon apply() races hotkey apply() | Single daemon owns all applies. 100ms debounce coalesces rapid commands. One apply at a time (asyncio single-thread). |
 
 ## Implementation Phases
 
@@ -80,7 +80,7 @@ Unlike pam-fprintd-sudo (which can lock you out), worst case here is neutral 650
 
 Pure functions, no hardware, no daemon. Every module gets tests first.
 
-1. **Scaffold**: create `~/dev/redshift-ctl/`, init git, write CLAUDE.md with project rules
+1. **Scaffold**: create `~/dev/brightness-ctl/`, init git, write CLAUDE.md with project rules
 2. **`config.py`** + `test_config.py`: TOML loading with defaults, validation, bash config migration
 3. **`color_temp.py`** + `test_color_temp.py`: port `get_base_temp()` — pure function of (hour, minute, config). Tests: midnight=NIGHT_TEMP, noon=DAY_TEMP, dawn/dusk linear interpolation, boundary minutes, clamping with offset
 4. **`brightness.py`** + `test_brightness.py`: state machine returning `(new_state, action)` tuples. Tests: SW up before HW, HW down before SW, clamp at min/max, boundary transitions between SW and HW ranges
@@ -110,7 +110,7 @@ Pure functions, no hardware, no daemon. Every module gets tests first.
    - All state in memory; writes to `state.json` on mutation for crash recovery
    - Tests: mock backend, in-process daemon, verify command sequences and debounce timing
 
-10. **`redshift-ctl` entry point**: detects subcommand — `daemon` starts the loop, everything else runs `cli.py`
+10. **`brightness-ctl` entry point**: detects subcommand — `daemon` starts the loop, everything else runs `cli.py`
 
 **Exit criteria**: ~80 tests passing. Can start daemon, send commands via socket, see mock backend calls in correct order with debouncing.
 
@@ -133,10 +133,10 @@ Pure functions, no hardware, no daemon. Every module gets tests first.
 
 13. **`install.sh`** (following `~/dev/audio-switcher/install.sh` pattern):
     - Verify Python 3.12+
-    - Stop old daemon if running (check `/tmp/redshift-ctl-daemon.pid`)
+    - Stop old daemon if running (check `/tmp/brightness-ctl-daemon.pid`)
     - Migrate bash config to TOML if old format exists
     - Migrate state file from key=value to JSON
-    - Symlink `src/redshift-ctl` -> `~/.local/bin/redshift-ctl`
+    - Symlink `src/brightness-ctl` -> `~/.local/bin/brightness-ctl`
     - Install systemd user service:
       ```ini
       [Unit]
@@ -145,7 +145,7 @@ Pure functions, no hardware, no daemon. Every module gets tests first.
 
       [Service]
       Type=simple
-      ExecStart=%h/.local/bin/redshift-ctl daemon
+      ExecStart=%h/.local/bin/brightness-ctl daemon
       Restart=on-failure
       RestartSec=5
       Environment=DISPLAY=:0
@@ -157,28 +157,28 @@ Pure functions, no hardware, no daemon. Every module gets tests first.
 
 14. **`uninstall.sh`**: stop + disable service, remove service file, remove symlinks, daemon-reload
 
-15. **Manual smoke test**: run `install.sh`, press all hotkeys (Alt+PgUp/PgDn, Alt+KP+/-, Alt+End), verify notifications appear fast and all 3 monitors respond consistently. Run `redshift-ctl status`.
+15. **Manual smoke test**: run `install.sh`, press all hotkeys (Alt+PgUp/PgDn, Alt+KP+/-, Alt+End), verify notifications appear fast and all 3 monitors respond consistently. Run `brightness-ctl status`.
 
 ### Phase 5: yadm Cleanup
 
 16. **Remove old files from yadm**:
-    - `yadm rm ~/.local/bin/redshift-ctl` (old bash script)
+    - `yadm rm ~/.local/bin/brightness-ctl` (old bash script)
     - `yadm rm ~/.local/bin/brightness` (old bash script)
     - `yadm rm ~/.local/bin/gammastep-autostart` (old wrapper)
     - Remove or update `~/.config/autostart/gammastep-indicator.desktop` (systemd `WantedBy=default.target` handles autostart now)
 
 17. **Add to yadm** (if not already tracked):
-    - `~/.config/redshift-ctl/config.toml` — user settings
+    - `~/.config/brightness-ctl/config.toml` — user settings
 
 18. **Update yadm tests** (`~/.config/yadm/test-dotfiles.sh`):
-    - "redshift-ctl is installed" → check symlink points to `~/dev/redshift-ctl/src/redshift-ctl` (same pattern as audio-switcher test)
-    - "redshift-ctl systemd service is enabled" → `systemctl --user is-enabled redshift-ctl`
-    - "redshift-ctl systemd service is active" → `systemctl --user is-active redshift-ctl`
+    - "brightness-ctl is installed" → check symlink points to `~/dev/brightness-ctl/src/brightness-ctl` (same pattern as audio-switcher test)
+    - "brightness-ctl systemd service is enabled" → `systemctl --user is-enabled brightness-ctl`
+    - "brightness-ctl systemd service is active" → `systemctl --user is-active brightness-ctl`
     - Config tests → check TOML format (`config.toml` with `day_temp`)
     - Remove gammastep-autostart tests (replaced by systemd)
     - Keep: gammastep installed, ddcutil installed, keybinding tests (commands unchanged)
 
-19. **Keybindings unchanged**: dconf entries still call `redshift-ctl warmer` etc. — same CLI name, same subcommands, just faster.
+19. **Keybindings unchanged**: dconf entries still call `brightness-ctl warmer` etc. — same CLI name, same subcommands, just faster.
 
 20. **Package dependencies** — add to `~/.config/yadm/packages/apt-linux-bambam.txt`:
     - `python3-pytest` (test runner)
@@ -188,11 +188,11 @@ Pure functions, no hardware, no daemon. Every module gets tests first.
 
 After full implementation:
 
-1. **Unit tests**: `cd ~/dev/redshift-ctl && pytest tests/ -v` — all green, no hardware needed
-2. **Daemon start**: `systemctl --user start redshift-ctl && redshift-ctl status`
+1. **Unit tests**: `cd ~/dev/brightness-ctl && pytest tests/ -v` — all green, no hardware needed
+2. **Daemon start**: `systemctl --user start brightness-ctl && brightness-ctl status`
 3. **Hotkey latency**: press Alt+PgUp — notification should appear in <100ms (vs 500-2000ms before)
 4. **Monitor consistency**: press Alt+PgUp 5 times, all 3 monitors should be at same brightness
 5. **Color stability**: press Alt+PgUp/PgDn repeatedly — color temperature should never reset to 6500K
-6. **Camera**: `redshift-ctl status` should show ambient light reading and auto-adjusted brightness
+6. **Camera**: `brightness-ctl status` should show ambient light reading and auto-adjusted brightness
 7. **yadm tests**: `bash ~/.config/yadm/test-dotfiles.sh` — all passing
 8. **Reboot survival**: reboot, verify daemon auto-starts and state is restored
