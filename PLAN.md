@@ -15,7 +15,7 @@ Unlike pam-fprintd-sudo (which can lock you out), worst case here is neutral 650
   CLAUDE.md                 # Project rules and architecture
   README.md
   PLAN.md
-  install.sh                # Symlinks, systemd service, config migration
+  install.sh                # Symlinks ~/.local/bin/brightness-ctl → src/, config migration
   uninstall.sh
   src/
     brightness-ctl            # Entry point (#!/usr/bin/env python3) — daemon or CLI
@@ -80,7 +80,7 @@ Unlike pam-fprintd-sudo (which can lock you out), worst case here is neutral 650
 
 Pure functions, no hardware, no daemon. Every module gets tests first.
 
-1. **Scaffold**: create `~/dev/brightness-ctl/`, init git, write CLAUDE.md with project rules
+1. **Scaffold** ✅: create `~/dev/brightness-ctl/`, init git, write CLAUDE.md with project rules. GitHub repo at `science/brightness-ctl`. Old bash script moved to `src/brightness-ctl` and renamed. `install.sh` creates symlink from `~/.local/bin/brightness-ctl`. yadm bootstrap clones repo + runs install.sh. All yadm dotfiles (dconf, tests, bootstrap, CLAUDE.md) updated to use `brightness-ctl`. Config dir migrated to `~/.config/brightness-ctl/`.
 2. **`config.py`** + `test_config.py`: TOML loading with defaults, validation, bash config migration
 3. **`color_temp.py`** + `test_color_temp.py`: port `get_base_temp()` — pure function of (hour, minute, config). Tests: midnight=NIGHT_TEMP, noon=DAY_TEMP, dawn/dusk linear interpolation, boundary minutes, clamping with offset
 4. **`brightness.py`** + `test_brightness.py`: state machine returning `(new_state, action)` tuples. Tests: SW up before HW, HW down before SW, clamp at min/max, boundary transitions between SW and HW ranges
@@ -131,12 +131,12 @@ Pure functions, no hardware, no daemon. Every module gets tests first.
 
 ### Phase 4: Install + Migration
 
-13. **`install.sh`** (following `~/dev/audio-switcher/install.sh` pattern):
+`install.sh` already exists and handles symlink creation + old script removal + config dir migration. Remaining work:
+
+13. **Extend `install.sh`** when Python daemon is ready:
     - Verify Python 3.12+
-    - Stop old daemon if running (check `/tmp/brightness-ctl-daemon.pid`)
     - Migrate bash config to TOML if old format exists
     - Migrate state file from key=value to JSON
-    - Symlink `src/brightness-ctl` -> `~/.local/bin/brightness-ctl`
     - Install systemd user service:
       ```ini
       [Unit]
@@ -161,26 +161,28 @@ Pure functions, no hardware, no daemon. Every module gets tests first.
 
 ### Phase 5: yadm Cleanup
 
-16. **Remove old files from yadm**:
-    - `yadm rm ~/.local/bin/brightness-ctl` (old bash script)
-    - `yadm rm ~/.local/bin/brightness` (old bash script)
-    - `yadm rm ~/.local/bin/gammastep-autostart` (old wrapper)
-    - Remove or update `~/.config/autostart/gammastep-indicator.desktop` (systemd `WantedBy=default.target` handles autostart now)
+Most yadm cleanup was done during the rename (scaffold step). Remaining work:
 
-17. **Add to yadm** (if not already tracked):
-    - `~/.config/brightness-ctl/config.toml` — user settings
+16. **Remove old files** (not yadm-tracked, just delete):
+    - `~/.local/bin/brightness` (old bash script, if still present)
+    - `~/.local/bin/gammastep-autostart` (old wrapper — replaced by systemd service)
+    - `~/.config/autostart/gammastep-indicator.desktop` (systemd `WantedBy=default.target` handles autostart)
 
-18. **Update yadm tests** (`~/.config/yadm/test-dotfiles.sh`):
-    - "brightness-ctl is installed" → check symlink points to `~/dev/brightness-ctl/src/brightness-ctl` (same pattern as audio-switcher test)
+17. **Already done** ✅:
+    - yadm bootstrap clones `science/brightness-ctl` and runs `install.sh`
+    - yadm test-dotfiles.sh updated: checks symlink → dev folder, keybindings use `brightness-ctl`
+    - dconf keybindings updated (live + `cinnamon-base.dconf`): commands and display names
+    - yadm CLAUDE.md updated: references `brightness-ctl` and symlink pattern
+    - Config dir migrated: `~/.config/redshift-ctl/` → `~/.config/brightness-ctl/`
+    - Old `~/.local/bin/redshift-ctl` script removed, replaced by symlink to dev folder
+
+18. **When Python daemon is ready** — update yadm tests:
     - "brightness-ctl systemd service is enabled" → `systemctl --user is-enabled brightness-ctl`
     - "brightness-ctl systemd service is active" → `systemctl --user is-active brightness-ctl`
     - Config tests → check TOML format (`config.toml` with `day_temp`)
-    - Remove gammastep-autostart tests (replaced by systemd)
-    - Keep: gammastep installed, ddcutil installed, keybinding tests (commands unchanged)
+    - Remove gammastep-autostart tests (already commented out, delete when service is live)
 
-19. **Keybindings unchanged**: dconf entries still call `brightness-ctl warmer` etc. — same CLI name, same subcommands, just faster.
-
-20. **Package dependencies** — add to `~/.config/yadm/packages/apt-linux-bambam.txt`:
+19. **Package dependencies** — add to `~/.config/yadm/packages/apt-linux-bambam.txt`:
     - `python3-pytest` (test runner)
     - `v4l-utils` (camera diagnostics via `v4l2-ctl`)
 
