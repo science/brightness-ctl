@@ -29,7 +29,9 @@ class TestMockBackend:
         displays = backend.detect_displays()
         assert len(displays) == 3
         assert displays[0]["id"] == 1
+        assert displays[0]["bus"] == 3
         assert displays[2]["id"] == 3
+        assert displays[2]["bus"] == 5
 
     def test_call_sequence_preserved(self):
         backend = MockHardwareBackend(num_displays=3)

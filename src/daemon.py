@@ -71,13 +71,17 @@ class Daemon:
             self.backend.apply_color_temp(applied, sw_dec, self.config["method"])
 
     async def apply_hw_brightness(self) -> None:
-        """Set hardware brightness on all displays sequentially."""
+        """Set hardware brightness on all displays in parallel (by bus ID)."""
         displays = self._displays or self.backend.detect_displays()
-        for d in displays:
-            if isinstance(self.backend, SubprocessBackend):
-                await self.backend.async_set_hw_brightness(d["id"], self.state.hw_brightness)
-            else:
+        if isinstance(self.backend, SubprocessBackend):
+            await self.backend.async_set_hw_brightness_parallel(displays, self.state.hw_brightness)
+        else:
+            for d in displays:
                 self.backend.set_hw_brightness(d["id"], self.state.hw_brightness)
+
+    def apply_hw_brightness_background(self) -> None:
+        """Fire-and-forget HW brightness apply (notification sent first)."""
+        asyncio.ensure_future(self.apply_hw_brightness())
 
     async def _notify(self, msg: str) -> None:
         """Send desktop notification."""
@@ -151,15 +155,15 @@ class Daemon:
             self.state.hw_brightness = new_bs.hw_brightness
             self._save_state()
             if action == Action.APPLY_SW:
-                await self.apply()
                 sw_dec = self._sw_to_decimal(self.state.sw_brightness)
                 if self.state.sw_brightness < 100:
                     await self._notify(f"Brightness: HW 0% + SW {sw_dec:.2f}")
                 else:
                     await self._notify(f"Brightness: HW {self.state.hw_brightness}%")
+                await self.apply()
             elif action == Action.APPLY_HW:
-                await self.apply_hw_brightness()
                 await self._notify(f"Brightness: HW {self.state.hw_brightness}%")
+                self.apply_hw_brightness_background()
             else:
                 await self._notify("Brightness: maximum (HW 100%)")
             return {"status": "ok", "sw_brightness": self.state.sw_brightness,
@@ -172,12 +176,12 @@ class Daemon:
             self.state.hw_brightness = new_bs.hw_brightness
             self._save_state()
             if action == Action.APPLY_HW:
-                await self.apply_hw_brightness()
                 await self._notify(f"Brightness: HW {self.state.hw_brightness}%")
+                self.apply_hw_brightness_background()
             elif action == Action.APPLY_SW:
-                await self.apply()
                 sw_dec = self._sw_to_decimal(self.state.sw_brightness)
                 await self._notify(f"Brightness: HW 0% + SW {sw_dec:.2f}")
+                await self.apply()
             else:
                 sw_dec = self._sw_to_decimal(self.config["sw_min"])
                 await self._notify(f"Brightness: minimum (HW 0% + SW {sw_dec:.2f})")
