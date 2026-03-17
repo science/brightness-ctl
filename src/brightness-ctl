@@ -1,384 +1,61 @@
-#!/bin/bash
-#
-# brightness-ctl - Color temperature & brightness manager with hotkey support
-# Uses gammastep in one-shot mode for reliable temperature/brightness control
-# and ddcutil for hardware (DDC/CI) brightness.
-#
+#!/usr/bin/env python3
+"""brightness-ctl — color temperature and brightness daemon/CLI."""
 
-set -euo pipefail
+import asyncio
+import os
+import sys
+from pathlib import Path
 
-CONFIG_DIR="$HOME/.config/brightness-ctl"
-STATE_FILE="$CONFIG_DIR/state"
-CONFIG_FILE="$CONFIG_DIR/config"
-LOCK_FILE="/tmp/brightness-ctl-daemon.lock"
-PID_FILE="/tmp/brightness-ctl-daemon.pid"
-NOTIFY_ID_FILE="/tmp/brightness-ctl-notify-id"
+# Add src/ to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
 
-# Defaults (overridden by config file)
-DAY_TEMP=2800
-NIGHT_TEMP=2200
-STEP=200
-MIN_TEMP=1500
-MAX_TEMP=6500
-DAWN_START=6   # hour (24h)
-DAWN_END=8
-DUSK_START=18
-DUSK_END=20
-METHOD="randr"
+from cli import main as cli_main
+from daemon import Daemon
+from hardware import SubprocessBackend
 
-# Brightness defaults
-HW_STEP=5          # Hardware brightness step (0-100%)
-SW_STEP=5           # Software brightness step (stored as 10-100, displayed as 0.10-1.00)
-SW_MIN=10           # Minimum software brightness (= 0.10)
 
-# Load config if it exists
-load_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
-    fi
-}
+def get_paths() -> dict:
+    """Get standard paths for config, state, and socket."""
+    config_dir = Path.home() / ".config" / "brightness-ctl"
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return {
+        "config_file": config_dir / "config.toml",
+        "state_file": config_dir / "state.json",
+        "socket_path": Path(runtime_dir) / "brightness-ctl.sock",
+    }
 
-# Ensure state file exists with defaults
-init_state() {
-    mkdir -p "$CONFIG_DIR"
-    if [[ ! -f "$STATE_FILE" ]]; then
-        echo "enabled=1" > "$STATE_FILE"
-        echo "offset=0" >> "$STATE_FILE"
-        echo "sw_brightness=100" >> "$STATE_FILE"
-        echo "hw_brightness=0" >> "$STATE_FILE"
-    fi
-}
 
-# Read state variables
-read_state() {
-    init_state
-    source "$STATE_FILE"
-    : "${enabled:=1}"
-    : "${offset:=0}"
-    : "${sw_brightness:=100}"
-    : "${hw_brightness:=0}"
-}
+def run_daemon(paths: dict) -> int:
+    """Start the daemon."""
+    daemon = Daemon(
+        config_path=paths["config_file"],
+        state_path=paths["state_file"],
+        socket_path=paths["socket_path"],
+        backend=SubprocessBackend(),
+    )
+    try:
+        asyncio.run(daemon.run())
+    except KeyboardInterrupt:
+        pass
+    return 0
 
-# Write state variables
-write_state() {
-    cat > "$STATE_FILE" <<EOF
-enabled=$enabled
-offset=$offset
-sw_brightness=$sw_brightness
-hw_brightness=$hw_brightness
-EOF
-}
 
-# Get base temperature based on time of day
-# Returns temperature in Kelvin
-get_base_temp() {
-    local hour minute fractional_hour
-    hour=$(date +%-H)
-    minute=$(date +%-M)
-    fractional_hour=$(echo "$hour + $minute / 60" | bc -l)
+def main() -> int:
+    paths = get_paths()
+    args = sys.argv[1:]
 
-    if (( $(echo "$fractional_hour >= $DAWN_START && $fractional_hour < $DAWN_END" | bc -l) )); then
-        # Dawn transition: night -> day
-        local progress
-        progress=$(echo "($fractional_hour - $DAWN_START) / ($DAWN_END - $DAWN_START)" | bc -l)
-        echo "$(echo "$NIGHT_TEMP + ($DAY_TEMP - $NIGHT_TEMP) * $progress" | bc -l | cut -d. -f1)"
-    elif (( $(echo "$fractional_hour >= $DAWN_END && $fractional_hour < $DUSK_START" | bc -l) )); then
-        # Daytime
-        echo "$DAY_TEMP"
-    elif (( $(echo "$fractional_hour >= $DUSK_START && $fractional_hour < $DUSK_END" | bc -l) )); then
-        # Dusk transition: day -> night
-        local progress
-        progress=$(echo "($fractional_hour - $DUSK_START) / ($DUSK_END - $DUSK_START)" | bc -l)
-        echo "$(echo "$DAY_TEMP + ($NIGHT_TEMP - $DAY_TEMP) * $progress" | bc -l | cut -d. -f1)"
-    else
-        # Nighttime
-        echo "$NIGHT_TEMP"
-    fi
-}
+    if not args or args[0] in ("help", "--help", "-h"):
+        return cli_main(str(paths["socket_path"]), args)
 
-# Clamp a value between min and max
-clamp() {
-    local val=$1 min=$2 max=$3
-    if (( val < min )); then echo "$min"
-    elif (( val > max )); then echo "$max"
-    else echo "$val"
-    fi
-}
+    cmd = args[0]
+    aliases = {"d": "daemon"}
+    cmd = aliases.get(cmd, cmd)
 
-# Format sw_brightness (integer 10-100) as decimal string (0.10-1.00)
-sw_to_decimal() {
-    printf "%d.%02d" $(($1 / 100)) $(($1 % 100))
-}
+    if cmd == "daemon":
+        return run_daemon(paths)
 
-# Apply the current color temperature and software brightness
-apply() {
-    read_state
-    if [[ "$enabled" == "0" ]]; then
-        gammastep -m "$METHOD" -P -x 2>/dev/null || true
-        return
-    fi
+    return cli_main(str(paths["socket_path"]), args)
 
-    local base_temp applied_temp sw_dec
-    base_temp=$(get_base_temp)
-    applied_temp=$((base_temp + offset))
-    applied_temp=$(clamp "$applied_temp" "$MIN_TEMP" "$MAX_TEMP")
-    sw_dec=$(sw_to_decimal "$sw_brightness")
 
-    gammastep -m "$METHOD" -P -O "$applied_temp" -b "$sw_dec:$sw_dec" 2>/dev/null || true
-}
-
-# Set hardware brightness on all monitors in parallel via ddcutil
-set_hw_brightness() {
-    local target=$1
-    # Detect displays and set brightness in parallel
-    local num_displays
-    num_displays=$(ddcutil detect 2>/dev/null | grep -c "^Display " || true)
-    if [[ "$num_displays" -eq 0 ]]; then
-        return
-    fi
-    for d in $(seq 1 "$num_displays"); do
-        ddcutil -d "$d" setvcp 10 "$target" 2>/dev/null &
-    done
-    wait
-}
-
-# Show notification with current status (replaces previous notification)
-notify() {
-    local msg="$1"
-    local replace_arg=()
-    if [[ -f "$NOTIFY_ID_FILE" ]]; then
-        replace_arg=(--replace-id "$(cat "$NOTIFY_ID_FILE")")
-    fi
-    local new_id
-    new_id=$(notify-send -a "brightness-ctl" \
-        --print-id \
-        -t 1500 \
-        -e \
-        "${replace_arg[@]}" \
-        "Brightness" "$msg" 2>/dev/null) || true
-    if [[ -n "$new_id" ]]; then
-        echo "$new_id" > "$NOTIFY_ID_FILE"
-    fi
-}
-
-# Command: warmer (more redshift, Alt+KP_Add)
-cmd_warmer() {
-    read_state
-    if [[ "$enabled" == "0" ]]; then
-        enabled=1
-    fi
-    offset=$((offset - STEP))
-    local base_temp applied_temp
-    base_temp=$(get_base_temp)
-    applied_temp=$((base_temp + offset))
-    applied_temp=$(clamp "$applied_temp" "$MIN_TEMP" "$MAX_TEMP")
-    # Recompute offset from clamped value to prevent drift
-    offset=$((applied_temp - base_temp))
-    write_state
-    apply
-    notify "Warmer: ${applied_temp}K  (base ${base_temp}K, offset ${offset}K)"
-}
-
-# Command: cooler (less redshift, Alt+KP_Subtract)
-cmd_cooler() {
-    read_state
-    if [[ "$enabled" == "0" ]]; then
-        enabled=1
-    fi
-    offset=$((offset + STEP))
-    local base_temp applied_temp
-    base_temp=$(get_base_temp)
-    applied_temp=$((base_temp + offset))
-    applied_temp=$(clamp "$applied_temp" "$MIN_TEMP" "$MAX_TEMP")
-    offset=$((applied_temp - base_temp))
-    write_state
-    apply
-    notify "Cooler: ${applied_temp}K  (base ${base_temp}K, offset ${offset}K)"
-}
-
-# Command: toggle (Alt+Delete)
-cmd_toggle() {
-    read_state
-    if [[ "$enabled" == "1" ]]; then
-        enabled=0
-        write_state
-        apply
-        notify "DISABLED (neutral 6500K)"
-    else
-        enabled=1
-        write_state
-        apply
-        local base_temp applied_temp
-        base_temp=$(get_base_temp)
-        applied_temp=$((base_temp + offset))
-        applied_temp=$(clamp "$applied_temp" "$MIN_TEMP" "$MAX_TEMP")
-        notify "ENABLED: ${applied_temp}K"
-    fi
-}
-
-# Command: reset offset to zero
-cmd_reset() {
-    read_state
-    offset=0
-    enabled=1
-    write_state
-    apply
-    local base_temp
-    base_temp=$(get_base_temp)
-    notify "RESET: ${base_temp}K (no offset)"
-}
-
-# Command: bright-down (Alt+Page_Down)
-# Decreases brightness: hardware first, then software once hardware is at 0%
-cmd_bright_down() {
-    read_state
-    local sw_dec
-    if [[ "$hw_brightness" -gt 0 ]]; then
-        # Decrease hardware brightness
-        hw_brightness=$((hw_brightness - HW_STEP))
-        hw_brightness=$(clamp "$hw_brightness" 0 100)
-        write_state
-        set_hw_brightness "$hw_brightness" &
-        notify "Brightness: HW ${hw_brightness}%"
-    elif [[ "$sw_brightness" -gt "$SW_MIN" ]]; then
-        # Hardware at 0%, decrease software brightness
-        sw_brightness=$((sw_brightness - SW_STEP))
-        sw_brightness=$(clamp "$sw_brightness" "$SW_MIN" 100)
-        write_state
-        apply
-        sw_dec=$(sw_to_decimal "$sw_brightness")
-        notify "Brightness: HW 0% + SW ${sw_dec}"
-    else
-        sw_dec=$(sw_to_decimal "$SW_MIN")
-        notify "Brightness: minimum (HW 0% + SW ${sw_dec})"
-    fi
-}
-
-# Command: bright-up (Alt+Page_Up)
-# Increases brightness: software first (back to 1.0), then hardware
-cmd_bright_up() {
-    read_state
-    local sw_dec
-    if [[ "$sw_brightness" -lt 100 ]]; then
-        # Increase software brightness first
-        sw_brightness=$((sw_brightness + SW_STEP))
-        sw_brightness=$(clamp "$sw_brightness" "$SW_MIN" 100)
-        write_state
-        apply
-        if [[ "$sw_brightness" -lt 100 ]]; then
-            sw_dec=$(sw_to_decimal "$sw_brightness")
-            notify "Brightness: HW 0% + SW ${sw_dec}"
-        else
-            notify "Brightness: HW ${hw_brightness}%"
-        fi
-    elif [[ "$hw_brightness" -lt 100 ]]; then
-        # Software at 1.0, increase hardware brightness
-        hw_brightness=$((hw_brightness + HW_STEP))
-        hw_brightness=$(clamp "$hw_brightness" 0 100)
-        write_state
-        set_hw_brightness "$hw_brightness" &
-        notify "Brightness: HW ${hw_brightness}%"
-    else
-        notify "Brightness: maximum (HW 100%)"
-    fi
-}
-
-# Command: status
-cmd_status() {
-    read_state
-    local base_temp applied_temp sw_dec
-    base_temp=$(get_base_temp)
-    applied_temp=$((base_temp + offset))
-    applied_temp=$(clamp "$applied_temp" "$MIN_TEMP" "$MAX_TEMP")
-    sw_dec=$(sw_to_decimal "$sw_brightness")
-    echo "Enabled:     $enabled"
-    echo "Base temp:   ${base_temp}K"
-    echo "Offset:      ${offset}K"
-    echo "Applied:     ${applied_temp}K"
-    echo "Day temp:    ${DAY_TEMP}K"
-    echo "Night temp:  ${NIGHT_TEMP}K"
-    echo "HW bright:   ${hw_brightness}%"
-    echo "SW bright:   ${sw_dec}"
-    echo "Time:        $(date +%H:%M)"
-    local daemon_running="no"
-    if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-        daemon_running="yes (PID $(cat "$PID_FILE"))"
-    fi
-    echo "Daemon:      $daemon_running"
-}
-
-# Command: daemon (background loop)
-cmd_daemon() {
-    # Check if already running
-    if [[ -f "$PID_FILE" ]]; then
-        local old_pid
-        old_pid=$(cat "$PID_FILE")
-        if kill -0 "$old_pid" 2>/dev/null; then
-            echo "Daemon already running (PID $old_pid)"
-            exit 0
-        fi
-    fi
-
-    echo $$ > "$PID_FILE"
-    trap 'rm -f "$PID_FILE" "$LOCK_FILE"' EXIT
-
-    echo "brightness-ctl daemon started (PID $$)"
-
-    while true; do
-        apply
-        sleep 30
-    done
-}
-
-# Command: stop daemon
-cmd_stop() {
-    if [[ -f "$PID_FILE" ]]; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid"
-            echo "Daemon stopped (PID $pid)"
-        else
-            echo "Daemon not running (stale PID file)"
-        fi
-        rm -f "$PID_FILE"
-    else
-        echo "No daemon PID file found"
-    fi
-}
-
-# Main
-load_config
-
-case "${1:-help}" in
-    warmer|w)       cmd_warmer ;;
-    cooler|c)       cmd_cooler ;;
-    toggle|t)       cmd_toggle ;;
-    reset|r)        cmd_reset ;;
-    bright-up|bu)   cmd_bright_up ;;
-    bright-down|bd) cmd_bright_down ;;
-    apply|a)        apply ;;
-    status|s)       cmd_status ;;
-    daemon|d)       cmd_daemon ;;
-    stop)           cmd_stop ;;
-    help|*)
-        echo "Usage: brightness-ctl <command>"
-        echo ""
-        echo "Color temperature:"
-        echo "  warmer (w)       Shift warmer (more red) by ${STEP}K"
-        echo "  cooler (c)       Shift cooler (less red) by ${STEP}K"
-        echo "  toggle (t)       Toggle color shift on/off"
-        echo "  reset  (r)       Reset offset to zero"
-        echo ""
-        echo "Brightness:"
-        echo "  bright-up   (bu) Increase brightness (SW up to 1.0, then HW)"
-        echo "  bright-down (bd) Decrease brightness (HW down to 0%, then SW)"
-        echo ""
-        echo "System:"
-        echo "  apply  (a)       Reapply current settings"
-        echo "  status (s)       Show current status"
-        echo "  daemon (d)       Start background daemon"
-        echo "  stop             Stop background daemon"
-        echo "  help             Show this help"
-        ;;
-esac
+if __name__ == "__main__":
+    sys.exit(main() or 0)

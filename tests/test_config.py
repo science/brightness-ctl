@@ -176,3 +176,16 @@ class TestBashMigration:
         cfg = load_config(toml_path)
         assert cfg["day_temp"] == 3000
         assert cfg["night_temp"] == 2500
+
+    def test_strips_inline_comments(self, tmp_path):
+        bash_config = tmp_path / "config"
+        bash_config.write_text(textwrap.dedent("""\
+            DAY_TEMP=2800       # Daytime color temperature
+            HW_STEP=5           # Hardware brightness step
+            METHOD="randr"
+        """))
+        toml_path = tmp_path / "config.toml"
+        migrate_bash_config(bash_config, toml_path)
+        cfg = load_config(toml_path)
+        assert cfg["day_temp"] == 2800
+        assert cfg["hw_step"] == 5

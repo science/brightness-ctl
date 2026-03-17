@@ -53,6 +53,9 @@ def migrate_bash_config(bash_path: Path, toml_path: Path) -> bool:
             key, _, val = line.partition("=")
             key = key.strip()
             val = val.strip().strip('"').strip("'")
+            # Strip inline comments (e.g. "2800  # Daytime temperature")
+            if "#" in val:
+                val = val[:val.index("#")].strip()
             toml_key = _BASH_KEY_MAP.get(key)
             if toml_key is not None:
                 if toml_key in _STRING_KEYS:
