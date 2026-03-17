@@ -1,4 +1,26 @@
-"""notify-send wrapper with replace-id support."""
+"""notify-send wrapper with replace-id persistence."""
+
+from pathlib import Path
+
+# Persist replace-id so notifications don't stack across daemon restarts
+_NOTIFY_ID_FILE = Path("/tmp/brightness-ctl-notify-id")
+
+
+def load_notify_id() -> int | None:
+    """Load the last notification replace-id from disk."""
+    try:
+        text = _NOTIFY_ID_FILE.read_text().strip()
+        return int(text) if text else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_notify_id(notify_id: int) -> None:
+    """Persist notification replace-id to disk."""
+    try:
+        _NOTIFY_ID_FILE.write_text(str(notify_id))
+    except OSError:
+        pass
 
 
 def build_notify_cmd(message: str, replace_id: int | None) -> list[str]:

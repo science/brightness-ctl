@@ -50,4 +50,35 @@ fi
 ln -sf "$SCRIPT_DIR/src/brightness-ctl" "$INSTALL_BIN"
 echo "Symlinked: $INSTALL_BIN -> $SCRIPT_DIR/src/brightness-ctl"
 
+# Migrate bash config to TOML
+if [[ -f "$CONFIG_DIR/config" && ! -f "$CONFIG_DIR/config.toml" ]]; then
+    echo "Migrating bash config to TOML..."
+    python3 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
+from config import migrate_bash_config
+from pathlib import Path
+migrate_bash_config(Path('$CONFIG_DIR/config'), Path('$CONFIG_DIR/config.toml'))
+"
+fi
+
+# Migrate bash state to JSON
+if [[ -f "$CONFIG_DIR/state" && ! -f "$CONFIG_DIR/state.json" ]]; then
+    echo "Migrating bash state to JSON..."
+    python3 -c "
+import json
+from pathlib import Path
+state_file = Path('$CONFIG_DIR/state')
+data = {}
+for line in state_file.read_text().splitlines():
+    if '=' in line:
+        k, v = line.split('=', 1)
+        if k == 'enabled':
+            data[k] = v == '1'
+        else:
+            try: data[k] = int(v)
+            except ValueError: data[k] = v
+Path('$CONFIG_DIR/state.json').write_text(json.dumps(data, indent=2) + '\n')
+"
+fi
+
 echo "Done. brightness-ctl is now available at $INSTALL_BIN"

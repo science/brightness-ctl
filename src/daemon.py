@@ -13,7 +13,7 @@ from brightness import BrightnessState, Action, bright_up, bright_down
 from color_temp import get_base_temp
 from config import load_config
 from hardware import MockHardwareBackend, SubprocessBackend
-from notify import build_notify_cmd
+from notify import build_notify_cmd, load_notify_id, save_notify_id
 from state import AppState, load_state, save_state
 
 
@@ -34,7 +34,7 @@ class Daemon:
         self.state = load_state(state_path)
         self.backend = backend or SubprocessBackend()
         self.should_stop = False
-        self.notify_id: int | None = None
+        self.notify_id: int | None = load_notify_id()
         self._displays: list[dict] | None = None
         self._debounce_handle: asyncio.TimerHandle | None = None
 
@@ -90,6 +90,7 @@ class Daemon:
             new_id = stdout.decode().strip()
             if new_id.isdigit():
                 self.notify_id = int(new_id)
+                save_notify_id(self.notify_id)
         except OSError:
             pass
 
