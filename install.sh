@@ -81,4 +81,23 @@ Path('$CONFIG_DIR/state.json').write_text(json.dumps(data, indent=2) + '\n')
 "
 fi
 
+# Add explanatory comment to cinnamon-base.dconf for brightness-ctl keybindings
+# These keybindings live in cinnamon-base.dconf (applied to all Cinnamon desktops
+# including VMs). On VMs, brightness-ctl is not installed so the keybindings are
+# harmless no-ops. The host WM intercepts these keys before the VM guest sees them,
+# so there is no conflict. The daemon itself is only installed on physical desktops
+# (gated by the linux-bambam case in yadm bootstrap).
+DCONF_FILE="$HOME/.config/yadm/dconf/cinnamon-base.dconf"
+if [[ -f "$DCONF_FILE" ]]; then
+    COMMENT="# brightness-ctl keybindings (custom0-4): controls color temperature and"
+    if ! grep -qF "$COMMENT" "$DCONF_FILE"; then
+        sed -i '/^\[org\/cinnamon\/desktop\/keybindings\/custom-keybindings\/custom0\]/i \
+# brightness-ctl keybindings (custom0-4): controls color temperature and\
+# hardware/software brightness via ~/dev/brightness-ctl daemon. Only installed\
+# on physical desktops (linux-bambam). Harmless no-ops on VMs since the binary\
+# is not present and the host WM intercepts these keys before the guest sees them.' "$DCONF_FILE"
+        echo "Added brightness-ctl comment to $DCONF_FILE"
+    fi
+fi
+
 echo "Done. brightness-ctl is now available at $INSTALL_BIN"
