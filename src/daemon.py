@@ -336,40 +336,106 @@ class Daemon:
         """Periodic camera read + auto-brightness adjustment."""
         from camera import (
             CameraError, capture_luminance, close_camera, open_camera,
-            resolve_camera_device,
+            probe_has_video_capture, resolve_camera_device,
         )
+
+        import functools
+        import sys
 
         interval = self.config["autobrightness_interval"]
         hint = self.config.get("camera_device")
         num_frames = self.config["camera_frames"]
+        brightness = self.config.get("camera_brightness")
         handle = None
+
+        resolve = functools.partial(
+            resolve_camera_device, capture_check=probe_has_video_capture,
+        )
 
         loop = asyncio.get_event_loop()
 
-        # Resolve the safe device by USB VID:PID. Refuses blocklisted nodes
-        # (e.g. the Logitech C615 meeting cam) even if set in config.
+        # Resolve the safe device by USB VID:PID + VIDEO_CAPTURE capability.
+        # Refuses blocklisted nodes (e.g. the Logitech C615 meeting cam)
+        # even if set in config, and skips metadata-only v4l2 nodes that
+        # share a VID:PID with the real capture node.
         try:
-            device = await loop.run_in_executor(
-                None, resolve_camera_device, hint,
-            )
+            device = await loop.run_in_executor(None, resolve, hint)
         except CameraError as e:
+            print(f"brightness-ctl: auto-brightness camera resolve failed: {e}",
+                  file=sys.stderr, flush=True)
             await self._notify(f"Auto-brightness: camera error — {e}")
+            self.state.autobrightness_enabled = False
+            self._save_state()
             return
 
         try:
             try:
-                handle = await loop.run_in_executor(None, open_camera, device)
-            except (OSError, CameraError):
-                # Camera not available — disable auto-adjustment silently
+                handle = await loop.run_in_executor(
+                    None,
+                    functools.partial(open_camera, device, brightness=brightness),
+                )
+            except (OSError, CameraError) as e:
+                # Surface this failure — silently returning makes a
+                # misbehaving camera indistinguishable from a working one
+                # and hides real bugs (e.g. kernel ABI mismatches) behind
+                # an apparently-healthy `auto-status: ON`.
+                print(f"brightness-ctl: auto-brightness open_camera failed: {e}",
+                      file=sys.stderr, flush=True)
+                await self._notify(f"Auto-brightness: camera open failed — {e}")
+                self.state.autobrightness_enabled = False
+                self._save_state()
                 return
 
             while not self.should_stop and self.state.autobrightness_enabled:
+                # If a previous iteration's reopen attempt failed we come
+                # back here with handle=None. Try again before capturing.
+                if handle is None:
+                    try:
+                        device = await loop.run_in_executor(None, resolve, hint)
+                        handle = await loop.run_in_executor(
+                            None,
+                            functools.partial(
+                                open_camera, device, brightness=brightness,
+                            ),
+                        )
+                    except (OSError, CameraError) as e:
+                        print(f"brightness-ctl: camera reopen still failing, "
+                              f"retry in {interval}s: {e}",
+                              file=sys.stderr, flush=True)
+                        await asyncio.sleep(interval)
+                        continue
+
                 try:
                     luminance = await loop.run_in_executor(
                         None, capture_luminance, handle, num_frames,
                     )
-                except OSError:
-                    break
+                except OSError as e:
+                    # Likely a suspend/resume or USB hotplug — the fd is
+                    # stale. Close it, try to reopen, and keep the loop
+                    # alive. If the reopen fails we sleep and retry next
+                    # tick rather than die, because a laptop lid might be
+                    # closed right now and the camera will come back later.
+                    print(f"brightness-ctl: camera read failed, reopening: {e}",
+                          file=sys.stderr, flush=True)
+                    try:
+                        await loop.run_in_executor(None, close_camera, handle)
+                    except Exception:
+                        pass
+                    handle = None
+                    try:
+                        device = await loop.run_in_executor(None, resolve, hint)
+                        handle = await loop.run_in_executor(
+                            None,
+                            functools.partial(
+                                open_camera, device, brightness=brightness,
+                            ),
+                        )
+                    except (OSError, CameraError) as e2:
+                        print(f"brightness-ctl: camera reopen failed, will "
+                              f"retry in {interval}s: {e2}",
+                              file=sys.stderr, flush=True)
+                    await asyncio.sleep(interval)
+                    continue
 
                 # Log reading (throttled to luminance_log_interval)
                 now = datetime.now()

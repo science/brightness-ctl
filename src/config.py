@@ -26,6 +26,11 @@ DEFAULT_CONFIG = {
     # the resolver will still refuse devices on the BLOCKED_VIDPIDS list.
     "camera_device": None,
     "camera_frames": 4,
+    # V4L2_CID_BRIGHTNESS value applied after open. None = don't touch.
+    # On the Alcor 058f:5608 ambient module the factory default is 0 which
+    # produces near-black frames; 32 shifts the operating point into a
+    # usable dynamic range. Tune per sensor.
+    "camera_brightness": None,
     "calibration_lookback_days": 7,
     "calibration_percentile_lo": 5,
     "calibration_percentile_hi": 95,
