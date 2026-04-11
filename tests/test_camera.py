@@ -236,3 +236,40 @@ class TestResolveCameraDevice:
         sysfs = _make_fake_sysfs(tmp_path, [])
         with pytest.raises(CameraError):
             resolve_camera_device(None, sysfs_root=sysfs)
+
+    def test_capture_check_filters_metadata_nodes(self, tmp_path):
+        """The Alcor exposes both a capture node and a metadata node with
+        the same 058f:5608 VID:PID. The resolver must skip the metadata
+        node via the injected capture_check, otherwise it rolls the dice
+        on uvcvideo's enumeration order and eventually hands a metadata
+        node to open_camera, which blows up deep in REQBUFS.
+        """
+        sysfs = _make_fake_sysfs(tmp_path, [
+            {"name": "video1", "vid": "058f", "pid": "5608"},  # metadata
+            {"name": "video2", "vid": "046d", "pid": "082c"},
+            {"name": "video4", "vid": "058f", "pid": "5608"},  # capture
+        ])
+        capture_only = {"/dev/video4"}
+        resolved = resolve_camera_device(
+            None,
+            sysfs_root=sysfs,
+            capture_check=lambda node: node in capture_only,
+        )
+        assert resolved == "/dev/video4"
+
+    def test_capture_check_all_filtered_raises(self, tmp_path):
+        sysfs = _make_fake_sysfs(tmp_path, [
+            {"name": "video0", "vid": "058f", "pid": "5608"},
+        ])
+        with pytest.raises(CameraError):
+            resolve_camera_device(
+                None, sysfs_root=sysfs, capture_check=lambda node: False,
+            )
+
+    def test_capture_check_none_preserves_old_behavior(self, tmp_path):
+        sysfs = _make_fake_sysfs(tmp_path, [
+            {"name": "video0", "vid": "058f", "pid": "5608"},
+        ])
+        assert resolve_camera_device(
+            None, sysfs_root=sysfs, capture_check=None,
+        ) == "/dev/video0"
