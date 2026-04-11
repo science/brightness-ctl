@@ -8,16 +8,54 @@ written to be usable by both:
 - A human (`steve`) working at the physical machine, and
 - A Claude Code session running on the host, picking up from here.
 
-The dev-VM Claude session wrote this file after committing the fixes
-that address the findings originally captured in an earlier
-`HOST_RESULTS.md` audit (now replaced by this doc). It is safe to work
-from just this file — you do not need the old audit.
+---
+
+## Current status on bambam (2026-04-10)
+
+**What's already done.** The host has been through a full bring-up run
+of this UAT by a previous host session, which surfaced and fixed several
+real bugs in the camera layer before the feature could actually function.
+Sections 0, 2, and Phases A/C/D are all **passing** as of commit `80b68ae`:
+
+- Daemon running under systemd as a user unit. `systemctl --user status
+  brightness-ctl` is active, enabled.
+- Auto-brightness is **ON**. The ambient-light loop is holding the
+  Alcor capture node (at whichever `/dev/videoN` uvcvideo assigned it
+  this boot — see Phase D for how to verify it's not the Logitech) and
+  writing luminance readings to
+  `~/.config/brightness-ctl/luminance-logs/` every 30 minutes.
+- State file: `autobrightness_enabled=true`, `anchor_combined=100.0`,
+  `cal_min/cal_max=null` (calibration not yet ready — needs ~50 hours
+  of awake-time to accumulate enough samples at the default interval).
+- 203 tests passing.
+
+**What's left for Steve (you).** Everything that requires a physical
+human or a hardware-level event:
+
+1. **Phase B** — hotkey/monitor regression, ~2 minutes at the keyboard.
+2. **Phase E** — calibration bootstrap, mostly passive over 2–3 days
+   unless you accelerate it (option 2 below).
+3. **Phase F** — closed-loop adjustment, ~5 minutes once calibration is
+   ready.
+4. **Phase G** — reboot and (new) suspend/resume survival verification.
+   Do these opportunistically during your normal workflow.
+5. **Phase H** — uninstall path. Optional; only run if you want to
+   verify `uninstall.sh`.
+
+**What's left for the dev-VM session.** `git push origin main` once
+UAT passes. Six commits ahead of origin as of this writing.
+
+Sections 0, 2, and Phases A/C/D below remain in this doc as a
+**fresh-install reference** — follow them verbatim if you bring up
+brightness-ctl on a new machine, or if something breaks badly on this
+one and you want to re-verify the hardware path. On a healthy bambam
+you can skip straight to Phase B.
 
 ---
 
 ## 0. Preconditions & current state
 
-**Branch:** `main`, 3 commits ahead of `origin/main`, not yet pushed.
+**Branch:** `main`, 6 commits ahead of `origin/main`, not yet pushed.
 
 **Relevant commits (should be visible on the host via virtiofs):**
 
@@ -26,56 +64,97 @@ from just this file — you do not need the old audit.
 | `0d84770` | Phase 3: camera-based auto-brightness |
 | `8905dec` | Phase 4: install.sh writes systemd unit; uninstall.sh |
 | `e3f8648` | camera: resolve ambient sensor by USB VID:PID, blocklist C615 |
+| `dc3d58e` | camera: fix 64-bit ctypes ABI, filter by VIDEO_CAPTURE, tune via BRIGHTNESS |
+| `80b68ae` | daemon: wire camera_brightness, surface errors, survive suspend/resume |
 
 Verify before starting:
 
 ```bash
 cd ~/dev/brightness-ctl
-git log --oneline -5   # e3f8648 should be at top
+git log --oneline -6   # 80b68ae should be at top
 git status             # should be clean (or only this file modified)
-pytest tests/ -q       # expect: 200 passed
+pytest tests/ -q       # expect: 203 passed
 ```
 
-If `pytest` doesn't report 200 passed, **stop** and investigate before
+If `pytest` doesn't report 203 passed, **stop** and investigate before
 touching the running daemon.
 
 ---
 
-## 1. Background: why the camera safety fix matters
+## 1. Background: the bugs this UAT was written to catch
 
-The earlier audit revealed that `/dev/videoN` numbers on bambam are
-**not** what the code assumed:
+Three bugs were found and fixed during the first host UAT. Phase C and
+Phase D each exist to verify one of them against real hardware.
 
-| Device        | VID:PID     | Product                                |
-|---------------|-------------|----------------------------------------|
-| `/dev/video0` | `058f:5608` | Alcor "USB Camera" (ambient sensor — **SAFE**) |
-| `/dev/video1` | `058f:5608` | Alcor metadata node |
+### Bug 1: camera selection by device-node number (fixed in `e3f8648`)
+
+`/dev/videoN` numbers on bambam are **not stable**:
+
+| Device        | VID:PID     | Product (this boot) |
+|---------------|-------------|---------------------|
+| `/dev/video0` | `058f:5608` | Alcor "USB Camera" (may be capture OR metadata — enumeration-order dependent) |
+| `/dev/video1` | `058f:5608` | Alcor (the other one) |
 | `/dev/video2` | `046d:082c` | **Logitech HD Webcam C615 — MEETING CAM** |
 | `/dev/video3` | `046d:082c` | Logitech metadata node |
 
-The Phase 3 code defaulted `camera_device = "/dev/video2"`. Enabling
-auto-brightness on the host as originally shipped would have opened the
-meeting camera.
+Numbers shift across reboots, USB hotplugs, and driver rebinds — we
+actually hit this mid-debug when `/dev/video0` disappeared and
+`/dev/video4` appeared with the Alcor capture/metadata roles shuffled.
+Phase 3 originally defaulted `camera_device = "/dev/video2"`, which on
+this host points at the Logitech meeting cam. Enabling auto-brightness
+as originally shipped would have opened the meeting camera.
 
-**Fix, as of `e3f8648`:**
+**Fix.** `src/camera.py` now selects devices by **USB VID:PID**, not
+node number. `ALCOR_AMBIENT_VIDPID = ("058f", "5608")` is allowlisted;
+`BLOCKED_VIDPIDS = {("046d", "082c")}` is a hard refuse list. Even if
+`config.toml` sets `camera_device` explicitly to a C615 node,
+`open_camera` refuses. Node numbers are never trusted as identity
+anywhere in code or docs. Phase C verifies this.
 
-- Device selection is now by USB VID:PID, via
-  `resolve_camera_device()` in `src/camera.py`, which walks
-  `/sys/class/video4linux/video*/device` and reads `idVendor` /
-  `idProduct` from the USB parent.
-- `ALCOR_AMBIENT_VIDPID = ("058f", "5608")` is the allowlisted device.
-- `BLOCKED_VIDPIDS = {("046d", "082c")}` is a hard refuse list
-  containing the C615. Even if `config.toml` sets `camera_device`
-  explicitly to a C615 node, `open_camera` refuses.
-- Config default `camera_device` is now `None` (auto-probe).
-- **Node numbers are never trusted as identity anywhere in code or docs.**
+### Bug 2: 64-bit ctypes ABI mismatch (fixed in `dc3d58e`)
 
-UAT section 3 Phase C exists specifically to verify this fix against
-real hardware **before** any command that opens the camera is run.
+`v4l2_buffer` was declared as 80 bytes in `src/camera.py`; the kernel
+ABI on 64-bit Linux is 88. The `m` field is a union whose pointer
+variant is 8 bytes wide, but only 4 bytes were reserved for it. Every
+field after `m` read 4 bytes early, so `QUERYBUF` returned
+`buf.length == 0` and `mmap(fd, 0, ...)` failed with `EINVAL` — and
+every ioctl was silently overflowing the Python buffer by 8 bytes.
+`v4l2_format` had the same class of bug at the `type` → `fmt.pix`
+boundary. Both are fixed, with `assert ctypes.sizeof(...)` guards at
+module load. Phase D verifies the fix by actually grabbing a frame.
+
+### Bug 3: metadata-node-vs-capture-node enumeration race (fixed in `dc3d58e`)
+
+The Alcor 058f:5608 exposes **two** v4l2 nodes with the same VID:PID:
+one `V4L2_CAP_VIDEO_CAPTURE` (the real camera), one `V4L2_CAP_META_CAPTURE`
+(metadata-only, can't `REQBUFS` as `VIDEO_CAPTURE`). Which one gets the
+lower `/dev/videoN` number depends on uvcvideo's probe order and is not
+stable. The VID:PID resolver was picking whichever came first
+alphabetically, which rolled the dice between "works" and "blows up in
+REQBUFS". Fixed by adding `probe_has_video_capture()` (runs `QUERYCAP`
+and checks the cap bit) and filtering through it in
+`resolve_camera_device(capture_check=...)`. Phase D implicitly verifies
+this by confirming the daemon actually holds a working fd.
+
+### Bug 4 (minor): silent swallow of `open_camera` errors (fixed in `80b68ae`)
+
+`_ambient_light_loop` used to catch `(OSError, CameraError)` from
+`open_camera` and silently `return`, which made the bugs above
+invisible for weeks — `auto-status` said `ON` while the loop had
+already died. The loop now logs to stderr (→ journal), sends a
+notify-send, and flips `autobrightness_enabled` back to `False` in
+state so `auto-status` matches reality.
 
 ---
 
 ## 2. Pre-UAT host cleanup (do this in order)
+
+> **On bambam this section is already done.** It is retained as a
+> reference for fresh installs on other machines, or for re-running
+> after something has gone badly wrong. On a healthy bambam,
+> `~/.local/bin/brightness-ctl` is already symlinked, the systemd
+> unit is installed and active, bash-era leftovers are gone, and
+> `pkill` would kill a working daemon — skip straight to Phase B.
 
 ### 2.1 Verify stale daemon state
 
@@ -239,29 +318,53 @@ auto-brightness feature is gated on this being correct.
 
 Now (and only now) open the camera via the daemon.
 
-- [ ] `brightness-ctl auto-on` returns OK. Notification reads
-      `Auto-brightness ON (anchor=..., cal: not ready)`.
+On bambam as of commit `80b68ae`, `camera_brightness = 32` is set in
+`~/.config/brightness-ctl/config.toml` because the Alcor 058f:5608
+module exposes only `V4L2_CID_BRIGHTNESS` (no gain/exposure controls)
+and at the factory default of 0 produces near-black frames
+(Y_mean ≈ 0.01). At +32 the mid-tone lands around Y≈63.
+
+- [ ] `brightness-ctl auto-on` returns exit 0. `brightness-ctl
+      auto-status` shows `ON`, anchor populated.
 - [ ] `journalctl --user -u brightness-ctl -n 50` shows **no**
-      `CameraError`, no "refusing to open", no Python traceback.
+      `CameraError`, no "refusing to open", no "reopening", no Python
+      traceback.
 - [ ] **Double-check the daemon is on the right device**:
       ```bash
       DPID=$(systemctl --user show --property MainPID --value brightness-ctl)
       ls -la /proc/$DPID/fd 2>/dev/null | grep -i video
       ```
-      Any `/dev/video*` fd shown must be the Alcor node (as identified
-      in Phase C), **never** the Logitech node. If this shows the
-      Logitech, immediately `brightness-ctl auto-off` and stop.
-- [ ] Wait 60-90 seconds. `brightness-ctl auto-status` still shows
-      `Calibration: not ready` (expected — no history yet). No error.
-- [ ] Wait ~30 minutes, then check:
+      Expect **3 fds** on the same Alcor capture node (the fd plus two
+      mmap buffers — `NUM_BUFFERS = 2`). The node number is **whatever
+      uvcvideo assigned this boot** — do not hard-check for a specific
+      number. What matters is:
+      1. All three fds point at the same node.
+      2. That node's VID:PID is `058f:5608` (Alcor), **not** `046d:082c`
+         (Logitech). Cross-check with:
+         ```bash
+         NODE=$(ls -la /proc/$DPID/fd 2>/dev/null | grep -o '/dev/video[0-9]*' | head -1)
+         udevadm info --query=property --name="$NODE" | grep -E "ID_(VENDOR|MODEL)_ID"
+         ```
+         Must print `ID_VENDOR_ID=058f` and `ID_MODEL_ID=5608`. Any
+         other pair → `brightness-ctl auto-off` immediately and stop.
+      3. No fds anywhere on a node whose VID:PID is `046d:082c`.
+- [ ] Wait ~65 seconds for the first ambient-loop tick, then check:
       ```bash
       ls -la ~/.config/brightness-ctl/luminance-logs/
-      tail -5 ~/.config/brightness-ctl/luminance-logs/luminance-*.log
+      cat ~/.config/brightness-ctl/luminance-logs/luminance-*.log
       ```
-      A `luminance-YYYY-MM-DD.log` file exists with at least one JSONL
-      entry containing `{"timestamp": ..., "luminance": ...}` and a
-      plausible value (Alcor raw Y in dim room lighting is typically
-      ~4-40; in bright lighting ~80-200; 0.0 would be suspicious).
+      Expect `luminance-YYYY-MM-DD.log` with at least one JSONL entry:
+      ```
+      {"timestamp": "2026-04-10T22:27:29", "luminance": 63.0}
+      ```
+      On this host with `camera_brightness=32` the value should be
+      **around 60–80** in typical indoor lighting. A reading of exactly
+      `0.0` means the sensor is seeing nothing — possible but suspicious;
+      verify the Alcor isn't physically covered or disconnected. A
+      reading of exactly `255.0` means saturation — lower
+      `camera_brightness` in config. First entry is logged immediately on
+      first successful capture; subsequent entries are throttled to
+      `luminance_log_interval` (default 1800s / 30min).
 
 ### Phase E: calibration bootstrap
 
@@ -324,15 +427,59 @@ brightness in response to ambient light.
 - [ ] `brightness-ctl auto-off` — auto loop stops, current brightness
       persists, no camera file descriptor in `/proc/$DPID/fd`.
 
-### Phase G: reboot survival
+### Phase G: reboot and suspend/resume survival
+
+#### G.1 — reboot
 
 - [ ] `brightness-ctl auto-on`, confirm it's running and healthy.
 - [ ] Reboot the machine.
 - [ ] After login: `systemctl --user status brightness-ctl` is active.
-      `brightness-ctl auto-status` — the
-      `autobrightness_enabled=true` state persisted, calibration
-      persisted, daemon re-opened the camera via the same resolver
-      (confirm no Logitech fd — Phase D's `/proc/$DPID/fd` check).
+      `brightness-ctl auto-status` — the `autobrightness_enabled=true`
+      state persisted, calibration persisted (if it was ready before
+      the reboot), daemon re-opened the camera via the same resolver
+      (re-run Phase D's `/proc/$DPID/fd` check — three fds on an Alcor
+      capture node, no Logitech).
+
+#### G.2 — suspend / resume
+
+`systemd-suspend` invalidates open V4L2 fds when the USB bus goes down
+and the camera re-enumerates on resume. The daemon is supposed to
+detect the stale fd, close it, re-resolve the device, reopen, and
+continue — see `_ambient_light_loop`'s reopen branch in `daemon.py`
+and commit `80b68ae` for the rationale.
+
+- [ ] Confirm `brightness-ctl auto-status` is `ON` before suspending.
+- [ ] Note the current video fd(s) held by the daemon:
+      ```bash
+      DPID=$(systemctl --user show --property MainPID --value brightness-ctl)
+      ls -la /proc/$DPID/fd 2>/dev/null | grep video
+      ```
+- [ ] Suspend (lid close, `systemctl suspend`, or Cinnamon menu).
+      Wait at least 30 seconds so it's a real suspend, not a quick
+      flicker.
+- [ ] Resume.
+- [ ] Within about 60 seconds (one `autobrightness_interval`), the
+      daemon should be back on a working Alcor capture node:
+      ```bash
+      journalctl --user -u brightness-ctl --since "2 minutes ago" \
+          --no-pager | grep -iE "reopen|camera"
+      ```
+      Expect at most one line of the form
+      `brightness-ctl: camera read failed, reopening: ...` followed by
+      silence. **No** lines saying `reopen still failing` repeatedly.
+      If you see `camera open failed` / `autobrightness_enabled=False`,
+      the reopen branch is broken — capture the journal output and
+      stop.
+- [ ] Re-run the `/proc/$DPID/fd` check from Phase D. Three fds on an
+      Alcor capture node (possibly a different `/dev/videoN` than
+      before the suspend — that's fine and is what the resolver is
+      there to handle).
+- [ ] New luminance-log entries accumulate after resume at the normal
+      cadence (`luminance_log_interval`, default 1800s).
+
+If the suspend is long enough to cover a scheduled log-write interval
+there will just be a gap in the log file — calibration tolerates that
+because it works over a 7-day rolling window, not contiguous samples.
 
 ### Phase H: uninstall path
 
@@ -381,7 +528,7 @@ calibration with more varied lighting samples, or shrink the range.
 
 **The resolver picks the wrong device anyway:**
 
-This would be a real bug in `e3f8648`. Capture:
+This would be a real bug in `e3f8648` / `dc3d58e`. Capture:
 
 ```bash
 ls -la /sys/class/video4linux/
@@ -392,13 +539,35 @@ for v in /sys/class/video4linux/video*; do
 done
 python3 -c "
 import sys; sys.path.insert(0, '/home/steve/dev/brightness-ctl/src')
-from camera import scan_v4l2_devices
-import json; print(json.dumps(scan_v4l2_devices(), indent=2))
+from camera import (scan_v4l2_devices, probe_has_video_capture,
+                    resolve_camera_device)
+import json
+entries = scan_v4l2_devices()
+for e in entries:
+    e['has_capture'] = probe_has_video_capture(e['node'])
+print(json.dumps(entries, indent=2))
+print('RESOLVED:', resolve_camera_device(None, capture_check=probe_has_video_capture))
 "
 ```
 
 Paste the output into a new issue / Claude session and **do not enable
 auto-brightness** until the resolver is fixed.
+
+**Luminance readings are stuck at 0.0 or very small:**
+
+The Alcor 058f:5608 module exposes only `V4L2_CID_BRIGHTNESS` and at
+the default 0 produces near-black frames. Check `camera_brightness` in
+`~/.config/brightness-ctl/config.toml` — it should be `32` on bambam.
+If you've wiped the config, Phase D's luminance sanity check will
+flag this.
+
+**The daemon keeps logging "camera read failed, reopening":**
+
+If this happens once after a suspend/resume, it's the intended
+suspend-recovery path (see Phase G.2). If it repeats continuously,
+the camera is either unplugged, the uvcvideo driver has lost state,
+or the retry code is broken. Check `lsusb | grep -i alcor` and the
+output of the `probe_has_video_capture` snippet above.
 
 ---
 
@@ -426,37 +595,39 @@ talking it through.
 
 ## 6. Known non-blocking issues (tracked, not yet fixed)
 
-- **`_ambient_light_loop` teardown warning** — at audit time, 3 tests
-  emitted `Task was destroyed but it is pending!` during teardown on
-  Python 3.12. Not reproducible on the dev VM's Python 3.14. Expected
-  to still show on bambam. If it does, fix by cancelling the task in
-  `Daemon.run()`'s shutdown path and awaiting its completion. Polish
+- **`_ambient_light_loop` teardown warning** — three tests emit
+  `Task was destroyed but it is pending!` during teardown on
+  Python 3.12. Still reproduces on bambam. Fix is to cancel the task
+  in `Daemon.run()`'s shutdown path and await its completion. Polish
   item, not a blocker.
-- **Open question about `~/.local/bin/gammastep-autostart`** — a
-  bash-era helper, not removed by `uninstall.sh` because I don't know
-  if anything else uses it. Safe to `rm` if nothing on the system
-  references it; check with
+- **`~/.local/bin/gammastep-autostart` is still on disk** — a bash-era
+  helper not removed by `uninstall.sh` because the original audit
+  wasn't sure if anything else referenced it. Safe to `rm` if nothing
+  on the system references it; check with
   `grep -r gammastep-autostart ~/.config ~/.local 2>/dev/null`.
 
 ---
 
 ## 7. When UAT passes
 
-1. Run `pytest tests/ -q` one more time for luck.
-2. `git push origin main` (3 commits: `0d84770`, `8905dec`, `e3f8648`).
-3. Decide whether to delete this `HOST_UAT.md` from the repo or keep it
-   as the canonical UAT runbook for future installs on other machines.
-   Recommendation: keep it, trim the "Phase 3" branding, and turn
-   section 3 into a reusable smoke-test checklist.
+1. Run `pytest tests/ -q` one more time for luck. Expect 203 passed.
+2. `git push origin main` (6 commits: `0d84770`, `8905dec`, `e3f8648`,
+   `06c9c21`, `dc3d58e`, `80b68ae`).
+3. Keep this `HOST_UAT.md` in the repo as the canonical install/UAT
+   runbook for future machines. On each fresh install, sections 0, 2,
+   and Phases A/C/D are the actual bring-up; Phases B/E/F/G/H are the
+   acceptance checks.
 
 ---
 
 ## Appendix: if you are Claude Code running on the host
 
 You have been started in `~/dev/brightness-ctl` on `linux-bambam` by
-the user and pointed at this file. Your job is to execute sections 0,
-2, and 3 of this document, in order, and report the PASS/FAIL state of
-each Phase A-H checkbox back to the user.
+the user and pointed at this file. **Check "Current status" at the top
+first** — on a healthy bambam, sections 0, 2, and Phases A/C/D are
+already done and your job reduces to helping Steve work through the
+remaining phases (B, E, F, G, H). On a fresh machine, work top to
+bottom.
 
 Important constraints:
 
@@ -464,8 +635,13 @@ Important constraints:
   latency (Phases B, F) require the human to press keys and look at
   screens. Ask the user to perform those steps and report back. Do not
   mark them PASS without confirmation.
+- **Suspend/resume (Phase G.2) also requires the human** — only they
+  can close the lid or invoke `systemctl suspend`. You can prepare the
+  check (record pre-suspend fds), but they have to trigger the suspend
+  and come back.
 - **Phase C is gating.** Do not run `brightness-ctl auto-on` (Phase D)
-  until you have visibly confirmed in Phase C that `resolve_camera_device(None)`
+  until you have visibly confirmed in Phase C that
+  `resolve_camera_device(None, capture_check=probe_has_video_capture)`
   returns an Alcor (`058f:5608`) node and that the C615 blocklist
   check succeeds. If Phase C fails, stop and report — do not try to
   "fix forward" into Phase D.
@@ -474,9 +650,14 @@ Important constraints:
   sudo — the systemd service is a user unit, and the device nodes are
   readable by the `video` group which `steve` is already in.
 - **Never pass a C615 path to `open_camera`**, even in a test script.
-  Use `resolve_camera_device(None)` and let it pick.
+  Use `resolve_camera_device(None, capture_check=probe_has_video_capture)`
+  and let it pick.
+- **`/proc/$DPID/fd` is the ground truth** for which camera the daemon
+  actually opened. `auto-status: ON` by itself is not sufficient —
+  before commit `80b68ae` the status was a lie when the camera failed
+  to open. Always follow `auto-on` with the fd check from Phase D.
 - **Journal is your friend** — after every action, run
   `journalctl --user -u brightness-ctl -n 30 --no-pager` and scan for
-  tracebacks or `CameraError`.
+  tracebacks, `CameraError`, or `reopening` messages.
 - When you finish a phase, update this file (or a scratch note) with
   PASS/FAIL and any unexpected output, so the human has a record.
