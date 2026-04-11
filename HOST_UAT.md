@@ -1,55 +1,216 @@
 # brightness-ctl — Host UAT Guide
 
-User acceptance testing for the Phase 3 (auto-brightness) + Phase 4
-(systemd install) work. This file is the **single source of truth** for
-what to run on `linux-bambam` to validate the daemon end-to-end. It is
-written to be usable by both:
+## What's done
 
-- A human (`steve`) working at the physical machine, and
-- A Claude Code session running on the host, picking up from here.
+The daemon is installed, running under systemd, and auto-brightness is
+**ON** and opening the correct camera (Alcor, never the Logitech C615).
+203 tests pass. All the code-level bugs found during bring-up are fixed
+and committed (see §1 below for the bug list if you're curious, or
+§Fresh-install reference for how to re-verify from scratch on a new
+machine).
+
+## Your UAT checklist
+
+Five tests, in roughly this order. Only Step 1 is "do it now" —
+everything else is opportunistic. Nothing on this list takes more than
+a few minutes; most of the time is passive waiting.
 
 ---
 
-## Current status on bambam (2026-04-10)
+### Step 1 — Hotkey regression (do this now, ~2 min)
 
-**What's already done.** The host has been through a full bring-up run
-of this UAT by a previous host session, which surfaced and fixed several
-real bugs in the camera layer before the feature could actually function.
-Sections 0, 2, and Phases A/C/D are all **passing** as of commit `80b68ae`:
+The point: confirm that the Phase-3 daemon didn't break the existing
+Phase-2 hotkey path. You sit at the keyboard, press five key combos,
+and watch the monitors.
 
-- Daemon running under systemd as a user unit. `systemctl --user status
-  brightness-ctl` is active, enabled.
-- Auto-brightness is **ON**. The ambient-light loop is holding the
-  Alcor capture node (at whichever `/dev/videoN` uvcvideo assigned it
-  this boot — see Phase D for how to verify it's not the Logitech) and
-  writing luminance readings to
-  `~/.config/brightness-ctl/luminance-logs/` every 30 minutes.
-- State file: `autobrightness_enabled=true`, `anchor_combined=100.0`,
-  `cal_min/cal_max=null` (calibration not yet ready — needs ~50 hours
-  of awake-time to accumulate enough samples at the default interval).
-- 203 tests passing.
+Open any window you can visibly see across all three monitors (a full
+desktop is fine — you're looking for brightness/color changes, not
+content), then press these in order. Each keypress should produce a
+visible notification within ~100ms.
 
-**What's left for Steve (you).** Everything that requires a physical
-human or a hardware-level event:
+| # | Keys            | What should happen                                                                            |
+|---|-----------------|-----------------------------------------------------------------------------------------------|
+| 1 | `Alt+Page_Up`   | All three monitors get visibly brighter (1 step). Notification says "Brightness up" or similar. |
+| 2 | `Alt+Page_Up`   | Another step brighter. Run it 3 more times. All monitors stay **in lockstep** — no monitor left behind. |
+| 3 | `Alt+Page_Down` | All three monitors dim by one step. Run it 3 more times.                                     |
+| 4 | `Alt+KP_Add`    | (Keypad `+`, not top-row `+`.) Screen gets **warmer** (more orange). Notification shows the new color temp. |
+| 5 | `Alt+KP_Subtract` | (Keypad `-`.) Screen gets **cooler** (more blue). Run both warmer/cooler a few times — the color offset should accumulate cleanly. |
+| 6 | `Alt+End`       | Gammastep turns **off** entirely (monitors jump to default 6500K-ish white). Press it again — it turns back on at whatever color temp it was at. |
 
-1. **Phase B** — hotkey/monitor regression, ~2 minutes at the keyboard.
-2. **Phase E** — calibration bootstrap, mostly passive over 2–3 days
-   unless you accelerate it (option 2 below).
-3. **Phase F** — closed-loop adjustment, ~5 minutes once calibration is
-   ready.
-4. **Phase G** — reboot and (new) suspend/resume survival verification.
-   Do these opportunistically during your normal workflow.
-5. **Phase H** — uninstall path. Optional; only run if you want to
-   verify `uninstall.sh`.
+After you're done, run this to confirm the state file reflects what
+you did:
 
-**What's left for the dev-VM session.** `git push origin main` once
-UAT passes. Six commits ahead of origin as of this writing.
+```bash
+brightness-ctl status
+```
 
-Sections 0, 2, and Phases A/C/D below remain in this doc as a
-**fresh-install reference** — follow them verbatim if you bring up
-brightness-ctl on a new machine, or if something breaks badly on this
-one and you want to re-verify the hardware path. On a healthy bambam
-you can skip straight to Phase B.
+**Pass criteria:**
+- Every keypress produced a notification within ~100ms (not 1+ seconds).
+- All three monitors changed together — no staggering, no monitor stuck at a different level.
+- Warmer/cooler accumulated; no monitor snapped back to 6500K partway through.
+- `Alt+End` toggles cleanly both directions.
+
+**If any of that fails:** tell me what you saw. Don't keep going.
+
+---
+
+### Step 2 — Next time you reboot (whenever, ~30 sec)
+
+The point: confirm the systemd unit auto-starts on login and the
+daemon re-opens the camera cleanly.
+
+Next time the machine reboots for any reason, after you log back in:
+
+```bash
+systemctl --user status brightness-ctl
+brightness-ctl auto-status
+DPID=$(systemctl --user show --property MainPID --value brightness-ctl)
+ls -la /proc/$DPID/fd 2>/dev/null | grep video
+```
+
+**Pass criteria:**
+- `systemctl status` shows `active (running)`.
+- `auto-status` shows `Auto-brightness: ON`.
+- `ls /proc/$DPID/fd` shows **3 fds on the same /dev/videoN** — the
+  specific number doesn't matter (it changes across reboots), but all
+  three must be the same node, and it must **not** be the Logitech.
+  To sanity-check which one it is:
+  ```bash
+  NODE=$(ls -la /proc/$DPID/fd 2>/dev/null | grep -o '/dev/video[0-9]*' | head -1)
+  udevadm info --query=property --name="$NODE" | grep -E "ID_(VENDOR|MODEL)_ID"
+  ```
+  Must print `ID_VENDOR_ID=058f` and `ID_MODEL_ID=5608` (Alcor).
+  Any other pair → `brightness-ctl auto-off` immediately and tell me.
+
+---
+
+### Step 3 — Next time you suspend/resume (whenever, ~30 sec)
+
+The point: confirm the daemon survives the USB camera being yanked
+under it when systemd-suspend powers down the bus, and successfully
+reopens the camera on resume.
+
+Next time you close the lid / lock + suspend / `systemctl suspend`,
+after you wake the machine back up:
+
+```bash
+journalctl --user -u brightness-ctl --since "3 minutes ago" --no-pager \
+    | grep -iE "camera|reopen"
+DPID=$(systemctl --user show --property MainPID --value brightness-ctl)
+ls -la /proc/$DPID/fd 2>/dev/null | grep video
+```
+
+**Pass criteria:**
+- At most one log line of the form
+  `brightness-ctl: camera read failed, reopening: ...` — that's the
+  expected recovery path. It means the daemon noticed the fd went
+  stale on resume, closed it, re-resolved the device, and reopened.
+- **No** lines saying `reopen still failing` repeatedly (more than
+  once or twice).
+- **No** lines saying `camera open failed` or
+  `autobrightness_enabled = False`.
+- fd check shows 3 fds on an Alcor node again (possibly a different
+  `/dev/videoN` than before the suspend — that's fine).
+
+If the journal shows sustained reopen failures, or the daemon gave up
+and disabled auto-brightness, tell me the exact log output.
+
+---
+
+### Step 4 — Calibration wait (passive, 2–3 days)
+
+The point: accumulate enough luminance readings for the calibrator to
+compute `cal_min` / `cal_max`.
+
+**You don't actively do anything for this one.** Just use the machine
+normally for 2–3 days. The daemon writes one reading to
+`~/.config/brightness-ctl/luminance-logs/luminance-YYYY-MM-DD.log`
+every 30 minutes while the system is awake. After enough time has
+passed, check:
+
+```bash
+brightness-ctl auto-status
+```
+
+If `Calibration: ready` and `cal_min` / `cal_max` are populated with a
+range ≥ 10, Step 4 is done — proceed to Step 5. If it still says `not
+ready` after 3+ days of normal use, tell me.
+
+**Accelerated path** (optional, if you don't want to wait 2–3 days):
+1. Edit `~/.config/brightness-ctl/config.toml`, add `luminance_log_interval = 60` (or change it to 60 if already present).
+2. `systemctl --user restart brightness-ctl`.
+3. Over the next 2 hours, vary the lighting in the room: open and close blinds, turn lamps on/off, cover the Alcor lens with your hand for a minute or two, uncover it. The goal is to produce a spread of readings, not just uniform values.
+4. After ~2 hours: `brightness-ctl auto-calibrate` followed by `brightness-ctl auto-status`. Should show `Calibration: ready`.
+5. Put `luminance_log_interval = 1800` back in config, `systemctl --user restart brightness-ctl`.
+
+---
+
+### Step 5 — Closed-loop test (after Step 4, ~3 min)
+
+The point: confirm that when the room actually gets darker/brighter,
+the daemon moves monitor brightness in response.
+
+Only run this after `auto-status` shows `Calibration: ready`.
+
+1. Note the starting brightness:
+   ```bash
+   brightness-ctl status
+   ```
+   Record the `HW bright:` and `SW bright:` values.
+2. Physically cover the Alcor lens with your hand (or something opaque) for **90 seconds**. The Alcor is the small camera module — if you're not sure which one it is, ask me before this step, don't cover the Logitech C615 meeting cam.
+3. Run `brightness-ctl status` again. The brightness values should have drifted **downward**.
+4. Uncover the Alcor. Wait another 90 seconds.
+5. Run `brightness-ctl status` once more. Values should have drifted back **up** toward their starting point.
+6. With auto still ON, press `Alt+Page_Up` once. Then:
+   ```bash
+   brightness-ctl auto-status
+   ```
+   `Anchor: ...` should have moved upward — the hotkey re-anchored
+   the loop instead of being fought by it.
+7. Turn auto off:
+   ```bash
+   brightness-ctl auto-off
+   ```
+   The current brightness persists. The `/proc/$DPID/fd` check from
+   Step 2 should now show **zero** video fds — the daemon released
+   the camera.
+8. Turn auto back on: `brightness-ctl auto-on`. fds should be back.
+
+**Pass criteria:** brightness actually moved down when covered, back
+up when uncovered, and the manual hotkey re-anchored instead of
+fighting the loop.
+
+---
+
+## That's it
+
+Once all 5 steps pass, UAT is complete and you can tell me to push.
+The remaining items (uninstall path verification, the
+`_ambient_light_loop` teardown warning, the stale
+`gammastep-autostart` bash script) are optional polish — they're
+itemised in §6 below but none of them blocks pushing.
+
+If anything in Steps 1–5 fails, tell me what you saw (exact command
+output, exact log lines) and I'll diagnose from the dev VM.
+
+---
+
+# Reference material
+
+Everything below is reference, not part of your checklist. You can
+stop reading here unless (a) something in the 5 steps above broke,
+(b) you want to know *why* those steps exist, or (c) you're bringing
+brightness-ctl up on a different machine. Contents:
+
+- **§0 / §2 / §3 Phases A, C, D** — full fresh-install bring-up
+  procedure. Already done on bambam; rerun on new machines.
+- **§1** — the four bugs the first host UAT found and fixed.
+- **§4** — diagnostics for when something in Steps 1–5 above breaks.
+- **§5** — rollback (uninstall the daemon, reset display state).
+- **§6** — known non-blocking issues (polish items).
+- **§7** — what to do when UAT passes (push, keep this doc).
+- **Appendix** — notes for a Claude Code session running on the host
+  and pointed at this file.
 
 ---
 
