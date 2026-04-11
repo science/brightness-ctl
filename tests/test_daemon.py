@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from autobrightness import to_combined
 from daemon import Daemon
 from hardware import MockHardwareBackend
 from config import DEFAULT_CONFIG
@@ -269,3 +270,137 @@ class TestSocketIPC:
         finally:
             server.close()
             await server.wait_closed()
+
+
+class TestAutoOn:
+    """auto-on command enables autobrightness and sets anchor."""
+
+    @pytest.mark.asyncio
+    async def test_auto_on_sets_anchor(self, daemon):
+        daemon.state.sw_brightness = 80
+        daemon.state.hw_brightness = 0
+        resp = await daemon.handle_command({"cmd": "auto-on"})
+        assert resp["status"] == "ok"
+        assert daemon.state.autobrightness_enabled is True
+        expected = to_combined(80, 0, sw_min=daemon.config["sw_min"])
+        assert daemon.state.anchor_combined == expected
+
+    @pytest.mark.asyncio
+    async def test_auto_on_with_hw(self, daemon):
+        daemon.state.sw_brightness = 100
+        daemon.state.hw_brightness = 50
+        resp = await daemon.handle_command({"cmd": "auto-on"})
+        assert daemon.state.anchor_combined == 150.0
+
+    @pytest.mark.asyncio
+    async def test_auto_on_returns_calibration(self, daemon):
+        resp = await daemon.handle_command({"cmd": "auto-on"})
+        assert "cal_min" in resp
+        assert "cal_max" in resp
+
+
+class TestAutoOff:
+    """auto-off command disables autobrightness."""
+
+    @pytest.mark.asyncio
+    async def test_auto_off(self, daemon):
+        daemon.state.autobrightness_enabled = True
+        daemon.state.anchor_combined = 100.0
+        resp = await daemon.handle_command({"cmd": "auto-off"})
+        assert resp["status"] == "ok"
+        assert daemon.state.autobrightness_enabled is False
+
+
+class TestAutoStatus:
+    """auto-status returns autobrightness state."""
+
+    @pytest.mark.asyncio
+    async def test_auto_status(self, daemon):
+        daemon.state.autobrightness_enabled = True
+        daemon.state.anchor_combined = 120.0
+        daemon.state.cal_min = 30.0
+        daemon.state.cal_max = 180.0
+        resp = await daemon.handle_command({"cmd": "auto-status"})
+        assert resp["status"] == "ok"
+        assert resp["autobrightness_enabled"] is True
+        assert resp["anchor_combined"] == 120.0
+        assert resp["calibration_ready"] is True
+
+    @pytest.mark.asyncio
+    async def test_auto_status_uncalibrated(self, daemon):
+        resp = await daemon.handle_command({"cmd": "auto-status"})
+        assert resp["calibration_ready"] is False
+
+
+class TestAutoCalibrate:
+    """auto-calibrate recomputes from logs."""
+
+    @pytest.mark.asyncio
+    async def test_auto_calibrate_no_data(self, daemon):
+        resp = await daemon.handle_command({"cmd": "auto-calibrate"})
+        assert resp["status"] == "ok"
+        assert resp["calibration_ready"] is False
+
+    @pytest.mark.asyncio
+    async def test_auto_calibrate_with_data(self, daemon, tmp_dirs):
+        """With enough log data, calibration becomes ready."""
+        from luminance_log import append_reading
+        log_dir = tmp_dirs["config_dir"] / "luminance-logs"
+        daemon.log_dir = log_dir
+        for i in range(120):
+            append_reading(log_dir, float(i * 2))  # 0 to 238
+        resp = await daemon.handle_command({"cmd": "auto-calibrate"})
+        assert resp["calibration_ready"] is True
+        assert resp["cal_min"] is not None
+        assert resp["cal_max"] is not None
+
+
+class TestAutoResetCal:
+    """auto-reset-cal clears calibration and logs."""
+
+    @pytest.mark.asyncio
+    async def test_auto_reset_cal(self, daemon, tmp_dirs):
+        daemon.state.cal_min = 30.0
+        daemon.state.cal_max = 180.0
+        log_dir = tmp_dirs["config_dir"] / "luminance-logs"
+        daemon.log_dir = log_dir
+        from luminance_log import append_reading
+        append_reading(log_dir, 100.0)
+        assert any(log_dir.glob("luminance-*.log"))
+
+        resp = await daemon.handle_command({"cmd": "auto-reset-cal"})
+        assert resp["status"] == "ok"
+        assert daemon.state.cal_min is None
+        assert daemon.state.cal_max is None
+        assert not any(log_dir.glob("luminance-*.log"))
+
+
+class TestAnchorUpdates:
+    """bright-up/bright-down update anchor when autobrightness is enabled."""
+
+    @pytest.mark.asyncio
+    async def test_bright_up_updates_anchor(self, daemon):
+        daemon.state.autobrightness_enabled = True
+        daemon.state.sw_brightness = 100
+        daemon.state.hw_brightness = 50
+        daemon.state.anchor_combined = 150.0
+        await daemon.handle_command({"cmd": "bright-up"})
+        assert daemon.state.anchor_combined == 155.0
+
+    @pytest.mark.asyncio
+    async def test_bright_down_updates_anchor(self, daemon):
+        daemon.state.autobrightness_enabled = True
+        daemon.state.sw_brightness = 100
+        daemon.state.hw_brightness = 50
+        daemon.state.anchor_combined = 150.0
+        await daemon.handle_command({"cmd": "bright-down"})
+        assert daemon.state.anchor_combined == 145.0
+
+    @pytest.mark.asyncio
+    async def test_bright_up_no_anchor_when_auto_off(self, daemon):
+        daemon.state.autobrightness_enabled = False
+        daemon.state.sw_brightness = 100
+        daemon.state.hw_brightness = 50
+        daemon.state.anchor_combined = None
+        await daemon.handle_command({"cmd": "bright-up"})
+        assert daemon.state.anchor_combined is None

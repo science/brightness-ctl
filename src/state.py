@@ -12,6 +12,10 @@ class AppState:
     offset: int = 0
     sw_brightness: int = 100
     hw_brightness: int = 0
+    autobrightness_enabled: bool = False
+    anchor_combined: float | None = None
+    cal_min: float | None = None
+    cal_max: float | None = None
 
 
 def load_state(path: Path) -> AppState:
@@ -28,6 +32,10 @@ def load_state(path: Path) -> AppState:
         offset=data.get("offset", 0),
         sw_brightness=data.get("sw_brightness", 100),
         hw_brightness=data.get("hw_brightness", 0),
+        autobrightness_enabled=data.get("autobrightness_enabled", False),
+        anchor_combined=data.get("anchor_combined"),
+        cal_min=data.get("cal_min"),
+        cal_max=data.get("cal_max"),
     )
 
 

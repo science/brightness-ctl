@@ -41,6 +41,23 @@ def format_status(resp: dict) -> str:
     return "\n".join(lines)
 
 
+def format_auto_status(resp: dict) -> str:
+    """Format an auto-status response for display."""
+    enabled = resp.get("autobrightness_enabled", False)
+    anchor = resp.get("anchor_combined")
+    cal_min = resp.get("cal_min")
+    cal_max = resp.get("cal_max")
+    cal_ready = resp.get("calibration_ready", False)
+    lines = [
+        f"Auto-brightness: {'ON' if enabled else 'OFF'}",
+        f"Anchor:          {anchor if anchor is not None else 'not set'}",
+        f"Calibration:     {'ready' if cal_ready else 'not ready'}",
+        f"  cal_min:       {cal_min if cal_min is not None else 'N/A'}",
+        f"  cal_max:       {cal_max if cal_max is not None else 'N/A'}",
+    ]
+    return "\n".join(lines)
+
+
 def main(socket_path: str, args: list[str]) -> int:
     """CLI entry point. Returns exit code."""
     if not args:
@@ -61,6 +78,13 @@ def main(socket_path: str, args: list[str]) -> int:
         print("  bright-up   (bu) Increase brightness (SW up to 1.0, then HW)")
         print("  bright-down (bd) Decrease brightness (HW down to 0%, then SW)")
         print()
+        print("Auto-brightness:")
+        print("  auto-on         (ao)  Enable, set anchor from current brightness")
+        print("  auto-off        (af)  Disable, keep current brightness")
+        print("  auto-status     (as)  Show calibration and anchor status")
+        print("  auto-calibrate  (ac)  Recompute calibration from logs")
+        print("  auto-reset-cal  (arc) Clear calibration + delete logs")
+        print()
         print("System:")
         print("  status (s)       Show current status")
         print("  daemon (d)       Start background daemon")
@@ -72,6 +96,8 @@ def main(socket_path: str, args: list[str]) -> int:
     aliases = {
         "w": "warmer", "c": "cooler", "t": "toggle", "r": "reset",
         "bu": "bright-up", "bd": "bright-down", "s": "status", "d": "daemon",
+        "ao": "auto-on", "af": "auto-off", "as": "auto-status",
+        "ac": "auto-calibrate", "arc": "auto-reset-cal",
     }
     cmd = aliases.get(cmd, cmd)
 
@@ -92,6 +118,8 @@ def main(socket_path: str, args: list[str]) -> int:
 
     if cmd == "status":
         print(format_status(resp))
+    elif cmd == "auto-status":
+        print(format_auto_status(resp))
     elif resp.get("status") == "error":
         print(f"Error: {resp.get('message', 'unknown')}", file=sys.stderr)
         return 1

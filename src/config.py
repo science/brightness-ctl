@@ -18,10 +18,19 @@ DEFAULT_CONFIG = {
     "hw_step": 5,
     "sw_step": 5,
     "sw_min": 10,
+    "autobrightness_range": 40,
+    "autobrightness_interval": 60,
+    "luminance_log_interval": 1800,
+    "camera_device": "/dev/video2",
+    "camera_frames": 4,
+    "calibration_lookback_days": 7,
+    "calibration_percentile_lo": 5,
+    "calibration_percentile_hi": 95,
+    "log_retention_days": 90,
 }
 
 # Keys that are strings (not ints) in the config
-_STRING_KEYS = {"method"}
+_STRING_KEYS = {"method", "camera_device"}
 
 # Mapping from bash VAR_NAME to toml key_name
 _BASH_KEY_MAP = {k.upper(): k for k in DEFAULT_CONFIG}

@@ -41,6 +41,17 @@ class TestDefaults:
         assert DEFAULT_CONFIG["sw_step"] == 5
         assert DEFAULT_CONFIG["sw_min"] == 10
 
+    def test_default_autobrightness(self):
+        assert DEFAULT_CONFIG["autobrightness_range"] == 40
+        assert DEFAULT_CONFIG["autobrightness_interval"] == 60
+        assert DEFAULT_CONFIG["luminance_log_interval"] == 1800
+        assert DEFAULT_CONFIG["camera_device"] == "/dev/video2"
+        assert DEFAULT_CONFIG["camera_frames"] == 4
+        assert DEFAULT_CONFIG["calibration_lookback_days"] == 7
+        assert DEFAULT_CONFIG["calibration_percentile_lo"] == 5
+        assert DEFAULT_CONFIG["calibration_percentile_hi"] == 95
+        assert DEFAULT_CONFIG["log_retention_days"] == 90
+
 
 class TestTomlLoading:
     """Load TOML config and merge with defaults."""
@@ -94,6 +105,20 @@ class TestTomlLoading:
         assert cfg["hw_step"] == 10
         assert cfg["sw_step"] == 10
         assert cfg["sw_min"] == 20
+
+    def test_autobrightness_config_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(textwrap.dedent("""\
+            autobrightness_range = 50
+            camera_device = "/dev/video4"
+            calibration_lookback_days = 14
+        """))
+        cfg = load_config(config_file)
+        assert cfg["autobrightness_range"] == 50
+        assert cfg["camera_device"] == "/dev/video4"
+        assert cfg["calibration_lookback_days"] == 14
+        # Unset keys get defaults
+        assert cfg["autobrightness_interval"] == 60
 
     def test_unknown_keys_preserved(self, tmp_path):
         """Future-proofing: unknown keys don't cause errors."""

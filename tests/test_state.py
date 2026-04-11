@@ -109,3 +109,56 @@ class TestJsonFormat:
         assert state.offset == -100
         assert state.sw_brightness == 100
         assert state.hw_brightness == 0
+
+
+class TestAutobrightnessFields:
+    """New autobrightness state fields."""
+
+    def test_defaults(self):
+        state = AppState()
+        assert state.autobrightness_enabled is False
+        assert state.anchor_combined is None
+        assert state.cal_min is None
+        assert state.cal_max is None
+
+    def test_round_trip(self, tmp_path):
+        path = tmp_path / "state.json"
+        state = AppState(
+            autobrightness_enabled=True,
+            anchor_combined=120.5,
+            cal_min=30.0,
+            cal_max=180.0,
+        )
+        save_state(state, path)
+        loaded = load_state(path)
+        assert loaded.autobrightness_enabled is True
+        assert loaded.anchor_combined == 120.5
+        assert loaded.cal_min == 30.0
+        assert loaded.cal_max == 180.0
+
+    def test_backward_compat_loading(self, tmp_path):
+        """Old state file without autobrightness fields loads with defaults."""
+        path = tmp_path / "state.json"
+        path.write_text(json.dumps({
+            "enabled": True, "offset": 0,
+            "sw_brightness": 100, "hw_brightness": 0,
+        }))
+        state = load_state(path)
+        assert state.autobrightness_enabled is False
+        assert state.anchor_combined is None
+        assert state.cal_min is None
+        assert state.cal_max is None
+
+    def test_null_values_load_as_none(self, tmp_path):
+        """Explicit null values in JSON load as None."""
+        path = tmp_path / "state.json"
+        path.write_text(json.dumps({
+            "enabled": True, "offset": 0,
+            "sw_brightness": 100, "hw_brightness": 0,
+            "autobrightness_enabled": False,
+            "anchor_combined": None,
+            "cal_min": None, "cal_max": None,
+        }))
+        state = load_state(path)
+        assert state.anchor_combined is None
+        assert state.cal_min is None
