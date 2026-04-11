@@ -54,66 +54,37 @@ brightness-ctl status
 
 ---
 
-### Step 2 — Next time you reboot (whenever, ~30 sec)
+### Step 2 — Next time you reboot (whenever)
 
-The point: confirm the systemd unit auto-starts on login and the
-daemon re-opens the camera cleanly.
+Just use the machine for ~5 minutes after reboot. The things to
+notice:
 
-Next time the machine reboots for any reason, after you log back in:
+- Do your screens look **visibly wrong** right after login? (Stuck
+  at harsh white 6500K, pitch dark, flickering, one monitor
+  different from the others.)
+- Do the Step 1 hotkeys still work? (Press `Alt+Page_Up` once,
+  notification appears, monitors get brighter.)
 
-```bash
-systemctl --user status brightness-ctl
-brightness-ctl auto-status
-DPID=$(systemctl --user show --property MainPID --value brightness-ctl)
-ls -la /proc/$DPID/fd 2>/dev/null | grep video
-```
-
-**Pass criteria:**
-- `systemctl status` shows `active (running)`.
-- `auto-status` shows `Auto-brightness: ON`.
-- `ls /proc/$DPID/fd` shows **3 fds on the same /dev/videoN** — the
-  specific number doesn't matter (it changes across reboots), but all
-  three must be the same node, and it must **not** be the Logitech.
-  To sanity-check which one it is:
-  ```bash
-  NODE=$(ls -la /proc/$DPID/fd 2>/dev/null | grep -o '/dev/video[0-9]*' | head -1)
-  udevadm info --query=property --name="$NODE" | grep -E "ID_(VENDOR|MODEL)_ID"
-  ```
-  Must print `ID_VENDOR_ID=058f` and `ID_MODEL_ID=5608` (Alcor).
-  Any other pair → `brightness-ctl auto-off` immediately and tell me.
+If both of those feel normal, reboot survival passes. **No
+commands to run.** If something looks off, tell me what you saw
+and I'll run diagnostics from here.
 
 ---
 
-### Step 3 — Next time you suspend/resume (whenever, ~30 sec)
+### Step 3 — Next time you suspend/resume (whenever)
 
-The point: confirm the daemon survives the USB camera being yanked
-under it when systemd-suspend powers down the bus, and successfully
-reopens the camera on resume.
+Same idea. After you wake the machine back up, use it for ~5 minutes.
+Notice:
 
-Next time you close the lid / lock + suspend / `systemctl suspend`,
-after you wake the machine back up:
+- Do the screens look right? (Same question as Step 2.)
+- Do hotkeys still work? (Press `Alt+Page_Up` once.)
+- Does brightness still respond to ambient light changes? (Only
+  meaningful after Step 4 finishes — skip this sub-check until then.)
 
-```bash
-journalctl --user -u brightness-ctl --since "3 minutes ago" --no-pager \
-    | grep -iE "camera|reopen"
-DPID=$(systemctl --user show --property MainPID --value brightness-ctl)
-ls -la /proc/$DPID/fd 2>/dev/null | grep video
-```
-
-**Pass criteria:**
-- At most one log line of the form
-  `brightness-ctl: camera read failed, reopening: ...` — that's the
-  expected recovery path. It means the daemon noticed the fd went
-  stale on resume, closed it, re-resolved the device, and reopened.
-- **No** lines saying `reopen still failing` repeatedly (more than
-  once or twice).
-- **No** lines saying `camera open failed` or
-  `autobrightness_enabled = False`.
-- fd check shows 3 fds on an Alcor node again (possibly a different
-  `/dev/videoN` than before the suspend — that's fine).
-
-If the journal shows sustained reopen failures, or the daemon gave up
-and disabled auto-brightness, tell me the exact log output.
+If it all feels normal, suspend survival passes. If it doesn't —
+typically the screens would be stuck at a wrong color temp, or
+`Alt+Page_Up` would silently do nothing — tell me and I'll check
+the journal from here.
 
 ---
 
@@ -147,38 +118,39 @@ ready` after 3+ days of normal use, tell me.
 
 ### Step 5 — Closed-loop test (after Step 4, ~3 min)
 
-The point: confirm that when the room actually gets darker/brighter,
-the daemon moves monitor brightness in response.
+The point: with calibration ready, confirm the daemon actually
+moves monitor brightness when the room gets darker or lighter.
 
-Only run this after `auto-status` shows `Calibration: ready`.
+Only run this after Step 4 shows `Calibration: ready`.
 
-1. Note the starting brightness:
-   ```bash
-   brightness-ctl status
-   ```
-   Record the `HW bright:` and `SW bright:` values.
-2. Physically cover the Alcor lens with your hand (or something opaque) for **90 seconds**. The Alcor is the small camera module — if you're not sure which one it is, ask me before this step, don't cover the Logitech C615 meeting cam.
-3. Run `brightness-ctl status` again. The brightness values should have drifted **downward**.
-4. Uncover the Alcor. Wait another 90 seconds.
-5. Run `brightness-ctl status` once more. Values should have drifted back **up** toward their starting point.
-6. With auto still ON, press `Alt+Page_Up` once. Then:
-   ```bash
-   brightness-ctl auto-status
-   ```
-   `Anchor: ...` should have moved upward — the hotkey re-anchored
-   the loop instead of being fought by it.
-7. Turn auto off:
-   ```bash
-   brightness-ctl auto-off
-   ```
-   The current brightness persists. The `/proc/$DPID/fd` check from
-   Step 2 should now show **zero** video fds — the daemon released
-   the camera.
-8. Turn auto back on: `brightness-ctl auto-on`. fds should be back.
+**You need to know which camera is the Alcor.** Bambam has two
+cameras: the **Alcor** (tiny ambient sensor, the one brightness-ctl
+uses) and the **Logitech C615** (your meeting cam). Before starting
+this step, look at your hardware and identify the Alcor — if you're
+not sure, ask me and I'll help figure out which physical module it
+is. **Do not cover the Logitech**; that's your meeting camera and
+has nothing to do with this.
 
-**Pass criteria:** brightness actually moved down when covered, back
-up when uncovered, and the manual hotkey re-anchored instead of
-fighting the loop.
+Once you know which camera is the Alcor:
+
+1. **Cover** the Alcor lens with your hand or a piece of tape. Keep
+   it covered for **90 seconds**.
+2. Look at your monitors. Did they dim noticeably while you were
+   covering the sensor?
+3. **Uncover** the Alcor. Wait another 90 seconds.
+4. Did the monitors brighten back up to roughly where they were?
+5. With the Alcor still uncovered, press `Alt+Page_Up` once. The
+   monitors should step brighter (as in Step 1) and then **stay
+   there** — the daemon should treat your hotkey press as a new
+   "preferred" brightness instead of immediately dragging it back
+   down.
+
+**Pass criteria:** covered → visibly dimmer, uncovered → visibly
+brighter, manual hotkey sticks.
+
+If any of that didn't happen — especially if covering the lens had
+no visible effect — tell me and I'll check the luminance log and
+calibration from here.
 
 ---
 
