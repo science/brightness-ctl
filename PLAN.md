@@ -1,5 +1,14 @@
 # Plan: Extract redshift-ctl bash script into ~/dev project and rewrite as Python daemon (brightness-ctl)
 
+> **Historical document.** This is the original planning doc from before
+> the project was built. It is kept for archaeological context only.
+> Parts of it are now inaccurate — in particular, device-node
+> assumptions like "/dev/video2 is the Alcor" turned out to be wrong
+> (node numbers are not stable, see `CLAUDE.md` §Camera). For current
+> architecture, safety rules, and testing gaps read `CLAUDE.md`. For
+> acceptance testing and bring-up on a new machine read `HOST_UAT.md`.
+> For the user-facing feature list read `README.md`.
+
 ## Context
 
 The current `redshift-ctl` is a 384-line bash script managed by yadm that has grown beyond dotfile scope. It manages color temperature (via `gammastep -P -O` one-shot calls) and brightness (SW via gammastep, HW via `ddcutil` DDC/CI) across 3 monitors. It has three bugs: hotkey response takes 500-2000ms because each keypress spawns a shell and blocks on gammastep; parallel `ddcutil` I2C commands cause monitors to update inconsistently; and brightness changes can inadvertently reset color temperature because `gammastep -P` wipes prior state and there's no coordination between the daemon's 30s apply loop and hotkey-triggered applies. The user also wants to add camera-based ambient light detection. This complexity warrants a proper project with a persistent daemon, socket IPC, and TDD.
