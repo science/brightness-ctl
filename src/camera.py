@@ -1,4 +1,23 @@
-"""V4L2 camera capture via ctypes — ambient light sensing."""
+"""V4L2 camera capture via ctypes — ambient light sensing.
+
+## Device-selection safety
+
+V4L2 device-node numbers (/dev/video0, /dev/video1, ...) are assigned by
+uvcvideo in USB probe order and are NOT stable across reboots or hotplugs.
+Older versions of this module hard-coded `/dev/video2` as "the Alcor ambient
+sensor", which was wrong: on some boots the Logitech C615 meeting camera
+landed at /dev/video2 instead. Opening the meeting cam would be a privacy
+incident.
+
+The selection rule is now:
+
+  - Scan /sys/class/video4linux and look up each node's USB VID:PID.
+  - Pick the device whose VID:PID matches ALCOR_AMBIENT_VIDPID (058f:5608).
+  - REFUSE to open any device whose VID:PID is in BLOCKED_VIDPIDS, even if
+    the user explicitly configured that node in config.toml.
+
+Never remove the Logitech C615 (046d:082c) from BLOCKED_VIDPIDS.
+"""
 
 import ctypes
 import ctypes.util
@@ -7,6 +26,124 @@ import mmap
 import os
 import struct
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+# --- Device selection (VID:PID based, node-number independent) ---
+
+ALCOR_AMBIENT_VIDPID: tuple[str, str] = ("058f", "5608")
+
+BLOCKED_VIDPIDS: set[tuple[str, str]] = {
+    ("046d", "082c"),  # Logitech HD Webcam C615 — user's meeting camera
+}
+
+_DEFAULT_SYSFS_ROOT = Path("/sys/class/video4linux")
+
+
+class CameraError(Exception):
+    """Raised when no safe camera can be resolved."""
+
+
+def _read_usb_vidpid(video_sysfs_entry: Path) -> tuple[str, str] | None:
+    """Given /sys/class/video4linux/videoN, walk up through the USB device
+    tree looking for idVendor/idProduct files. Returns (vid, pid) or None.
+    """
+    device_link = video_sysfs_entry / "device"
+    if not device_link.exists():
+        return None
+    try:
+        current = device_link.resolve()
+    except OSError:
+        return None
+    for _ in range(8):  # bounded walk up the USB topology
+        vid_file = current / "idVendor"
+        pid_file = current / "idProduct"
+        if vid_file.is_file() and pid_file.is_file():
+            try:
+                return vid_file.read_text().strip(), pid_file.read_text().strip()
+            except OSError:
+                return None
+        if current.parent == current:
+            return None
+        current = current.parent
+    return None
+
+
+def scan_v4l2_devices(sysfs_root: Path = _DEFAULT_SYSFS_ROOT) -> list[dict]:
+    """Return [{"node": "/dev/videoN", "vid": "xxxx", "pid": "yyyy"}, ...]
+    sorted by node name. Entries without a resolvable USB VID:PID are skipped.
+    """
+    if not sysfs_root.exists():
+        return []
+    results = []
+    for entry in sorted(sysfs_root.iterdir()):
+        if not entry.name.startswith("video"):
+            continue
+        vidpid = _read_usb_vidpid(entry)
+        if vidpid is None:
+            continue
+        results.append({
+            "node": f"/dev/{entry.name}",
+            "vid": vidpid[0],
+            "pid": vidpid[1],
+        })
+    return results
+
+
+def select_camera_device(
+    entries: list[dict],
+    hint: str | None,
+    allowed_vidpid: tuple[str, str],
+    blocked_vidpids: set[tuple[str, str]],
+) -> str:
+    """Pure selection logic. See module docstring for the safety rule.
+
+    - If `hint` is given: it must resolve to an entry in `entries` and its
+      VID:PID must not be in `blocked_vidpids`. Returns the hint.
+    - If `hint` is None: returns the first entry matching `allowed_vidpid`.
+    - Raises CameraError on any failure.
+    """
+    if not entries:
+        raise CameraError("no video devices found under /sys/class/video4linux")
+
+    by_node = {e["node"]: e for e in entries}
+
+    if hint is not None:
+        if hint not in by_node:
+            raise CameraError(
+                f"configured camera device {hint} not found in sysfs — "
+                f"cannot verify it is safe to open. Available: "
+                f"{sorted(by_node.keys())}"
+            )
+        e = by_node[hint]
+        if (e["vid"], e["pid"]) in blocked_vidpids:
+            raise CameraError(
+                f"refusing to open {hint}: USB {e['vid']}:{e['pid']} is in "
+                f"blocked VID:PID list (likely a meeting camera). "
+                f"Remove camera_device from config.toml to auto-probe."
+            )
+        return hint
+
+    for e in entries:
+        if (e["vid"], e["pid"]) == allowed_vidpid:
+            return e["node"]
+
+    vidpids = sorted({(e["vid"], e["pid"]) for e in entries})
+    raise CameraError(
+        f"no allowed camera found: want VID:PID {allowed_vidpid[0]}:"
+        f"{allowed_vidpid[1]}, saw {vidpids}"
+    )
+
+
+def resolve_camera_device(
+    hint: str | None,
+    sysfs_root: Path = _DEFAULT_SYSFS_ROOT,
+) -> str:
+    """Scan sysfs and return a safe /dev/videoN path, or raise CameraError."""
+    entries = scan_v4l2_devices(sysfs_root)
+    return select_camera_device(
+        entries, hint, ALCOR_AMBIENT_VIDPID, BLOCKED_VIDPIDS
+    )
 
 
 # --- Pure extraction (testable without hardware) ---
@@ -122,7 +259,17 @@ def _ioctl(fd, request, arg):
 
 
 def open_camera(device: str, width: int = 160, height: int = 120) -> CameraHandle:
-    """Open V4L2 camera device and set up YUYV capture with mmap buffers."""
+    """Open V4L2 camera device and set up YUYV capture with mmap buffers.
+
+    Re-runs the safety resolver with `device` as a hint — even if a caller
+    hands us a concrete path, we still verify it is not in BLOCKED_VIDPIDS.
+    """
+    resolved = resolve_camera_device(device)
+    if resolved != device:
+        raise CameraError(
+            f"refusing to open {device}: resolver chose {resolved}. "
+            f"Pass resolve_camera_device(None) result instead."
+        )
     fd = os.open(device, os.O_RDWR | os.O_NONBLOCK)
 
     try:

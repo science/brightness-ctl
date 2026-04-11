@@ -21,7 +21,10 @@ DEFAULT_CONFIG = {
     "autobrightness_range": 40,
     "autobrightness_interval": 60,
     "luminance_log_interval": 1800,
-    "camera_device": "/dev/video2",
+    # None = auto-probe via resolve_camera_device (recommended).
+    # Set to an explicit /dev/videoN only if you know what you're doing;
+    # the resolver will still refuse devices on the BLOCKED_VIDPIDS list.
+    "camera_device": None,
     "camera_frames": 4,
     "calibration_lookback_days": 7,
     "calibration_percentile_lo": 5,

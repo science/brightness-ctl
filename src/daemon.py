@@ -334,19 +334,32 @@ class Daemon:
 
     async def _ambient_light_loop(self) -> None:
         """Periodic camera read + auto-brightness adjustment."""
-        from camera import open_camera, capture_luminance, close_camera
+        from camera import (
+            CameraError, capture_luminance, close_camera, open_camera,
+            resolve_camera_device,
+        )
 
         interval = self.config["autobrightness_interval"]
-        device = self.config["camera_device"]
+        hint = self.config.get("camera_device")
         num_frames = self.config["camera_frames"]
         handle = None
 
+        loop = asyncio.get_event_loop()
+
+        # Resolve the safe device by USB VID:PID. Refuses blocklisted nodes
+        # (e.g. the Logitech C615 meeting cam) even if set in config.
         try:
-            # Open camera (blocking call in executor)
-            loop = asyncio.get_event_loop()
+            device = await loop.run_in_executor(
+                None, resolve_camera_device, hint,
+            )
+        except CameraError as e:
+            await self._notify(f"Auto-brightness: camera error — {e}")
+            return
+
+        try:
             try:
                 handle = await loop.run_in_executor(None, open_camera, device)
-            except OSError:
+            except (OSError, CameraError):
                 # Camera not available — disable auto-adjustment silently
                 return
 

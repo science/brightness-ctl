@@ -100,15 +100,17 @@ All external tool calls go through a `HardwareBackend` protocol:
 
 ### Camera (V4L2)
 
-- Device: Alcor Micro 058f:5608 at `/dev/video2` (configurable)
-- **NEVER touch** `/dev/video0` or `/dev/video1` (Logitech C615 meeting camera)
+- Ambient sensor: Alcor Micro **USB 058f:5608** (`ALCOR_AMBIENT_VIDPID`)
+- **BLOCKED**: Logitech HD Webcam C615 **USB 046d:082c** (meeting camera) — in `BLOCKED_VIDPIDS` in `camera.py`
+- **Device node numbers (`/dev/video0`, `/dev/video1`, ...) are NOT stable** — they are assigned by `uvcvideo` in USB probe order and can flip across reboots/hotplugs. Do NOT encode "the Alcor is at /dev/videoN" as a rule anywhere. Always resolve by VID:PID via `resolve_camera_device()`.
+- Config key `camera_device` defaults to `None` (auto-probe). If explicitly set, the resolver still refuses any node whose USB VID:PID is in `BLOCKED_VIDPIDS`.
 - Format: YUYV 160x120, raw ioctls via ctypes/fcntl/mmap
 - Discard first frame after stream-on (warmup zeros)
 - Average 3-5 frames to reduce noise
 
 ## Do Not Do (Safety Rules)
 
-1. **Never access /dev/video0 or /dev/video1** — those are the Logitech C615 meeting webcam. Camera config must default to `/dev/video2`.
+1. **Never open USB 046d:082c** (Logitech HD Webcam C615 — user's meeting camera). This is enforced in code by `BLOCKED_VIDPIDS` in `src/camera.py`. Never remove the C615 from that set. Never refer to "safe" or "unsafe" V4L2 devices by their `/dev/videoN` number — always by USB VID:PID, because device-node numbers are assigned at USB probe time and are not stable.
 2. **Never run parallel ddcutil commands** — sequential only to prevent I2C bus contention.
 3. **Never use pip/venv for runtime** — all runtime dependencies are Python 3.12 stdlib (asyncio, tomllib, ctypes, fcntl, mmap, json, struct, socket, subprocess).
 4. **Never block the asyncio event loop** — use `create_subprocess_exec` for external tools, never `subprocess.run`.

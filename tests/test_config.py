@@ -45,7 +45,10 @@ class TestDefaults:
         assert DEFAULT_CONFIG["autobrightness_range"] == 40
         assert DEFAULT_CONFIG["autobrightness_interval"] == 60
         assert DEFAULT_CONFIG["luminance_log_interval"] == 1800
-        assert DEFAULT_CONFIG["camera_device"] == "/dev/video2"
+        # camera_device defaults to None (auto-probe by VID:PID).
+        # Hard-coding a node path here was a safety bug — see HOST_RESULTS.md
+        # and docstring in camera.py.
+        assert DEFAULT_CONFIG["camera_device"] is None
         assert DEFAULT_CONFIG["camera_frames"] == 4
         assert DEFAULT_CONFIG["calibration_lookback_days"] == 7
         assert DEFAULT_CONFIG["calibration_percentile_lo"] == 5
