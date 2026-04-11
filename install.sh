@@ -100,4 +100,35 @@ if [[ -f "$DCONF_FILE" ]]; then
     fi
 fi
 
+mkdir -p "$SERVICE_DIR"
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Color temperature and brightness daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/brightness-ctl daemon
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=default.target
+EOF
+echo "Wrote systemd unit: $SERVICE_FILE"
+
+systemctl --user daemon-reload
+systemctl --user enable brightness-ctl.service >/dev/null
+if systemctl --user is-active --quiet brightness-ctl.service; then
+    echo "Restarting brightness-ctl service..."
+    systemctl --user restart brightness-ctl.service
+else
+    echo "Starting brightness-ctl service..."
+    systemctl --user start brightness-ctl.service || {
+        echo "WARN: could not start service (may require graphical session)" >&2
+    }
+fi
+
 echo "Done. brightness-ctl is now available at $INSTALL_BIN"
