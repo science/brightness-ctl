@@ -88,15 +88,16 @@ the journal from here.
 
 ---
 
-### Step 4 — Calibration wait (passive, 2–3 days)
+### Step 4 — Calibration wait (passive, ~1 day)
 
 The point: accumulate enough luminance readings for the calibrator to
 compute `cal_min` / `cal_max`.
 
 **You don't actively do anything for this one.** Just use the machine
-normally for 2–3 days. The daemon writes one reading to
+normally for about a day. The daemon writes one reading to
 `~/.config/brightness-ctl/luminance-logs/luminance-YYYY-MM-DD.log`
-every 30 minutes while the system is awake. After enough time has
+every 30 minutes while the system is awake. Calibration requires ≥30
+readings with a range ≥ 10 luminance units. After enough time has
 passed, check:
 
 ```bash
@@ -105,13 +106,21 @@ brightness-ctl auto-status
 
 If `Calibration: ready` and `cal_min` / `cal_max` are populated with a
 range ≥ 10, Step 4 is done — proceed to Step 5. If it still says `not
-ready` after 3+ days of normal use, tell me.
+ready` after 2+ days of normal use, tell me.
 
-**Accelerated path** (optional, if you don't want to wait 2–3 days):
+**Shortcut**: if you already know your environment's luminance range
+(e.g. from a previous calibration or the luminance logs), you can
+skip the wait entirely:
+
+```bash
+brightness-ctl auto-set-cal 20 180    # set min and max directly
+```
+
+**Accelerated path** (optional, if you don't want to wait):
 1. Edit `~/.config/brightness-ctl/config.toml`, add `luminance_log_interval = 60` (or change it to 60 if already present).
 2. `systemctl --user restart brightness-ctl`.
-3. Over the next 2 hours, vary the lighting in the room: open and close blinds, turn lamps on/off, cover the Alcor lens with your hand for a minute or two, uncover it. The goal is to produce a spread of readings, not just uniform values.
-4. After ~2 hours: `brightness-ctl auto-calibrate` followed by `brightness-ctl auto-status`. Should show `Calibration: ready`.
+3. Over the next hour, vary the lighting in the room: open and close blinds, turn lamps on/off, cover the Alcor lens with your hand for a minute or two, uncover it. The goal is to produce a spread of readings, not just uniform values.
+4. After ~1 hour: `brightness-ctl auto-calibrate` followed by `brightness-ctl auto-status`. Should show `Calibration: ready`.
 5. Put `luminance_log_interval = 1800` back in config, `systemctl --user restart brightness-ctl`.
 
 ---

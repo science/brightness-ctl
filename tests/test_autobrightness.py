@@ -8,6 +8,7 @@ from autobrightness import (
     calibration_ready,
     compute_ambient_pct,
     compute_adjustment,
+    compute_anchor,
     compute_target,
 )
 
@@ -162,3 +163,26 @@ class TestComputeTarget:
     def test_clamp_low(self):
         # anchor=10, dark room -> would be -10, clamped to 0
         assert compute_target(10, 0.0, 40) == 0.0
+
+
+class TestComputeAnchor:
+    """Back-compute anchor from desired brightness + current ambient."""
+
+    def test_inverse_of_compute_target(self):
+        for pct in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            anchor = compute_anchor(100.0, pct, 40)
+            assert compute_target(anchor, pct, 40) == pytest.approx(100.0)
+
+    def test_neutral_ambient(self):
+        # At 50% ambient, anchor == target (no adjustment)
+        assert compute_anchor(100.0, 0.5, 40) == 100.0
+
+    def test_dark_room(self):
+        # Dark room: anchor must be HIGHER than target so offset lands on target
+        anchor = compute_anchor(80.0, 0.0, 40)
+        assert anchor == 100.0  # 80 - (0.0 - 0.5) * 40 = 80 + 20 = 100
+
+    def test_bright_room(self):
+        # Bright room: anchor must be LOWER than target
+        anchor = compute_anchor(120.0, 1.0, 40)
+        assert anchor == 100.0  # 120 - (1.0 - 0.5) * 40 = 120 - 20 = 100

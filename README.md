@@ -7,7 +7,7 @@ Color temperature and brightness daemon for X11/Cinnamon desktops. Python asynci
 - **Color temperature**: automatic time-based dawn/dusk transitions with manual warmer/cooler hotkey adjustment.
 - **Software brightness**: `gammastep` one-shot (GPU-based, fast).
 - **Hardware brightness**: `ddcutil` DDC/CI (monitor backlight).
-- **Ambient auto-brightness** (optional): reads a USB camera every 60s, calibrates against a 7-day rolling window of luminance samples, and drives monitor brightness to track the room. Survives suspend/resume and USB hotplugs — the daemon reopens the camera when the fd goes stale.
+- **Ambient auto-brightness** (optional): reads a USB camera every 60s, calibrates against a 7-day rolling window of luminance samples (≥30 readings required), and drives monitor brightness to track the room. Manual hotkey adjustments are honored — the daemon back-computes the anchor so the ambient loop doesn't fight the user. Survives suspend/resume and USB hotplugs — the daemon reopens the camera when the fd goes stale.
 - **Camera-safety interlock**: devices are selected by USB VID:PID, never by `/dev/videoN` number (those flip across reboots). A hard blocklist refuses to open known meeting cameras even if explicitly configured.
 
 ## Requirements
@@ -47,6 +47,8 @@ brightness-ctl auto-on         # Start the camera loop, anchor at current bright
 brightness-ctl auto-off        # Stop the loop, release the camera
 brightness-ctl auto-status     # Report state + calibration + anchor
 brightness-ctl auto-calibrate  # Recompute cal_min/cal_max from recent luminance log
+brightness-ctl auto-set-cal 20 180  # Manually set calibration range
+brightness-ctl auto-reset-cal      # Clear calibration + delete logs
 ```
 
 ## Hotkeys (Cinnamon)

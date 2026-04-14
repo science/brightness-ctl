@@ -49,3 +49,8 @@ def compute_target(anchor: float, ambient_pct: float, autobrightness_range: floa
     adjustment = compute_adjustment(ambient_pct, autobrightness_range)
     target = anchor + adjustment
     return max(0.0, min(200.0, target))
+
+
+def compute_anchor(target: float, ambient_pct: float, autobrightness_range: float) -> float:
+    """Back-compute anchor from desired brightness and current ambient."""
+    return target - compute_adjustment(ambient_pct, autobrightness_range)

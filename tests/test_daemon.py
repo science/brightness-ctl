@@ -430,6 +430,7 @@ class TestAnchorUpdates:
     @pytest.mark.asyncio
     async def test_bright_up_updates_anchor(self, daemon):
         daemon.state.autobrightness_enabled = True
+        daemon._last_ambient_pct = None  # no ambient reading yet
         daemon.state.sw_brightness = 100
         daemon.state.hw_brightness = 50
         daemon.state.anchor_combined = 150.0
@@ -439,6 +440,7 @@ class TestAnchorUpdates:
     @pytest.mark.asyncio
     async def test_bright_down_updates_anchor(self, daemon):
         daemon.state.autobrightness_enabled = True
+        daemon._last_ambient_pct = None  # no ambient reading yet
         daemon.state.sw_brightness = 100
         daemon.state.hw_brightness = 50
         daemon.state.anchor_combined = 150.0
@@ -453,3 +455,39 @@ class TestAnchorUpdates:
         daemon.state.anchor_combined = None
         await daemon.handle_command({"cmd": "bright-up"})
         assert daemon.state.anchor_combined is None
+
+    @pytest.mark.asyncio
+    async def test_bright_up_back_computes_anchor(self, daemon):
+        """In a dark room, bright-up should set anchor HIGHER than the
+        resulting brightness so the ambient loop won't dim it back."""
+        daemon.state.autobrightness_enabled = True
+        daemon._last_ambient_pct = 0.0  # dark room
+        daemon.state.sw_brightness = 100
+        daemon.state.hw_brightness = 0
+        await daemon.handle_command({"cmd": "bright-up"})
+        # bright-up steps hw to 5, combined = 105
+        # anchor should be 105 - (0.0 - 0.5) * 40 = 105 + 20 = 125
+        from autobrightness import to_combined, compute_target
+        new_combined = to_combined(daemon.state.sw_brightness,
+                                   daemon.state.hw_brightness,
+                                   sw_min=daemon.config["sw_min"])
+        target = compute_target(daemon.state.anchor_combined, 0.0,
+                                daemon.config["autobrightness_range"])
+        assert target == pytest.approx(new_combined)
+
+    @pytest.mark.asyncio
+    async def test_bright_down_back_computes_anchor(self, daemon):
+        """In a bright room, bright-down should set anchor LOWER than the
+        resulting brightness so the ambient loop won't brighten it back."""
+        daemon.state.autobrightness_enabled = True
+        daemon._last_ambient_pct = 1.0  # bright room
+        daemon.state.sw_brightness = 100
+        daemon.state.hw_brightness = 50
+        await daemon.handle_command({"cmd": "bright-down"})
+        from autobrightness import to_combined, compute_target
+        new_combined = to_combined(daemon.state.sw_brightness,
+                                   daemon.state.hw_brightness,
+                                   sw_min=daemon.config["sw_min"])
+        target = compute_target(daemon.state.anchor_combined, 1.0,
+                                daemon.config["autobrightness_range"])
+        assert target == pytest.approx(new_combined)

@@ -9,7 +9,7 @@ import signal
 from datetime import datetime
 from pathlib import Path
 
-from autobrightness import to_combined, from_combined, calibration_ready, compute_ambient_pct, compute_target
+from autobrightness import to_combined, from_combined, calibration_ready, compute_ambient_pct, compute_anchor, compute_target
 from brightness import BrightnessState, Action, bright_up, bright_down
 from color_temp import get_base_temp
 from config import load_config
@@ -42,6 +42,7 @@ class Daemon:
         self.log_dir = config_path.parent / "luminance-logs"
         self._camera_handle = None
         self._ambient_task: asyncio.Task | None = None
+        self._last_ambient_pct: float | None = None
         self._last_log_rotation: datetime | None = None
         self._last_luminance_log: datetime | None = None
 
@@ -161,10 +162,17 @@ class Daemon:
             self.state.sw_brightness = new_bs.sw_brightness
             self.state.hw_brightness = new_bs.hw_brightness
             if self.state.autobrightness_enabled:
-                self.state.anchor_combined = to_combined(
+                new_combined = to_combined(
                     self.state.sw_brightness, self.state.hw_brightness,
                     sw_min=self.config["sw_min"],
                 )
+                if self._last_ambient_pct is not None:
+                    self.state.anchor_combined = compute_anchor(
+                        new_combined, self._last_ambient_pct,
+                        self.config["autobrightness_range"],
+                    )
+                else:
+                    self.state.anchor_combined = new_combined
             self._save_state()
             if action == Action.APPLY_SW:
                 sw_dec = self._sw_to_decimal(self.state.sw_brightness)
@@ -187,10 +195,17 @@ class Daemon:
             self.state.sw_brightness = new_bs.sw_brightness
             self.state.hw_brightness = new_bs.hw_brightness
             if self.state.autobrightness_enabled:
-                self.state.anchor_combined = to_combined(
+                new_combined = to_combined(
                     self.state.sw_brightness, self.state.hw_brightness,
                     sw_min=self.config["sw_min"],
                 )
+                if self._last_ambient_pct is not None:
+                    self.state.anchor_combined = compute_anchor(
+                        new_combined, self._last_ambient_pct,
+                        self.config["autobrightness_range"],
+                    )
+                else:
+                    self.state.anchor_combined = new_combined
             self._save_state()
             if action == Action.APPLY_HW:
                 await self._notify(f"Brightness: HW {self.state.hw_brightness}%")
@@ -480,6 +495,7 @@ class Daemon:
                     ambient_pct = compute_ambient_pct(
                         luminance, self.state.cal_min, self.state.cal_max,
                     )
+                    self._last_ambient_pct = ambient_pct
                     target = compute_target(
                         self.state.anchor_combined, ambient_pct,
                         self.config["autobrightness_range"],

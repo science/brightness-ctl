@@ -17,7 +17,7 @@ src/
   cli.py               # Socket client: connect, send JSON command, print response
   color_temp.py        # get_base_temp(hour, minute, config) — pure math
   brightness.py        # bright_up/down state machine — pure logic
-  autobrightness.py    # compute_target / compute_ambient_pct / calibration predicates — pure
+  autobrightness.py    # compute_target / compute_anchor / compute_ambient_pct / calibration — pure
   luminance_log.py     # append_reading / load_readings / compute_calibration / rotate_logs
   camera.py            # V4L2 ioctls (ctypes/fcntl/mmap), VID:PID resolver, capture filter
   hardware.py          # HardwareBackend protocol + SubprocessBackend (gammastep, ddcutil)
@@ -127,7 +127,7 @@ All state lives in memory; written to `~/.config/brightness-ctl/state.json` on m
 
 Hotkey presses invoke `brightness-ctl warmer` etc. The entry point connects to the daemon socket, sends a JSON command, reads the response, and exits. Latency target: <50ms total.
 
-Commands: `daemon`, `status`, `stop`, `warmer`, `cooler`, `toggle`, `reset`, `bright-up`, `bright-down`, plus the auto-brightness family: `auto-on`, `auto-off`, `auto-status`, `auto-calibrate`. All go through the same socket protocol and are dispatched in `daemon.py`.
+Commands: `daemon`, `status`, `stop`, `warmer`, `cooler`, `toggle`, `reset`, `bright-up`, `bright-down`, plus the auto-brightness family: `auto-on`, `auto-off`, `auto-status`, `auto-calibrate`, `auto-set-cal`, `auto-reset-cal`. All go through the same socket protocol and are dispatched in `daemon.py`. `auto-set-cal <min> <max>` is the only parameterized command — it sends an `"args"` key alongside `"cmd"` in the JSON request.
 
 ### Hardware Backend
 
@@ -147,8 +147,17 @@ All external tool calls go through a `HardwareBackend` protocol:
 - **Sensor-specific brightness tuning**: the Alcor 058f:5608 module exposes only `V4L2_CID_BRIGHTNESS` — no gain, no exposure — and at the factory default of 0 produces near-black frames. `open_camera(brightness=N)` applies `V4L2_CID_BRIGHTNESS` after format negotiation. The host config sets `camera_brightness = 32` to land the mid-tone around Y≈63. If you move to a sensor with real exposure controls, this key becomes optional.
 - **64-bit ctypes ABI assertions**: `v4l2_buffer` must be 88 bytes; `v4l2_format` must be 208 bytes. Both are asserted at module load because the field layouts are hand-rolled from `<linux/videodev2.h>` and a single missing padding field silently corrupts every ioctl. If you touch either struct, re-run the real-hardware smoke test above — the tests will pass even when the layout is wrong.
 - Format: YUYV 160x120, raw ioctls via ctypes/fcntl/mmap
+- **Stream reset per capture**: `capture_luminance()` does STREAMOFF → re-queue buffers → STREAMON before each burst. Without this, the Alcor's internal auto-gain accumulates while the stream is idle between 60s reads, causing readings to ramp from ~63 to ~179 in a dark room. The reset was verified empirically (5 consecutive reads stable at 63.5±0.1).
 - Discard first frame after stream-on (warmup zeros)
 - Average 3-5 frames to reduce noise
+
+### Anchor back-computation
+
+When the user adjusts brightness via `bright-up`/`bright-down` while auto-brightness is active, the anchor must be back-computed so the ambient loop doesn't fight the adjustment. The user's manual brightness is treated as "what I want right now," not "what the neutral midpoint should be."
+
+- `compute_anchor(target, ambient_pct, range)` is the inverse of `compute_target`: it solves for the anchor value that, at the current ambient_pct, produces the user's chosen brightness as the target.
+- The daemon tracks `_last_ambient_pct` (updated each ambient loop tick). If available, `bright-up`/`bright-down` use it to back-compute; otherwise they fall back to setting anchor = brightness directly (pre-calibration or before the first camera read).
+- `auto-on` does NOT back-compute — it sets anchor = current brightness, establishing the user's baseline for a fresh auto-brightness session.
 
 ### Ambient loop resilience
 
