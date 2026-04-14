@@ -5,13 +5,16 @@ import socket
 import sys
 
 
-def send_command(socket_path: str, cmd: str) -> dict:
+def send_command(socket_path: str, cmd: str, args: dict | None = None) -> dict:
     """Connect to daemon socket, send command, return response."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.settimeout(5.0)
         sock.connect(socket_path)
-        request = json.dumps({"cmd": cmd}) + "\n"
+        request_dict = {"cmd": cmd}
+        if args is not None:
+            request_dict["args"] = args
+        request = json.dumps(request_dict) + "\n"
         sock.sendall(request.encode())
 
         data = b""
@@ -84,6 +87,7 @@ def main(socket_path: str, args: list[str]) -> int:
         print("  auto-status     (as)  Show calibration and anchor status")
         print("  auto-calibrate  (ac)  Recompute calibration from logs")
         print("  auto-reset-cal  (arc) Clear calibration + delete logs")
+        print("  auto-set-cal    (asc) Manually set cal_min and cal_max")
         print()
         print("System:")
         print("  status (s)       Show current status")
@@ -98,14 +102,26 @@ def main(socket_path: str, args: list[str]) -> int:
         "bu": "bright-up", "bd": "bright-down", "s": "status", "d": "daemon",
         "ao": "auto-on", "af": "auto-off", "as": "auto-status",
         "ac": "auto-calibrate", "arc": "auto-reset-cal",
+        "asc": "auto-set-cal",
     }
     cmd = aliases.get(cmd, cmd)
 
     if cmd == "daemon":
         return None  # Signal to caller to start daemon instead
 
+    send_args = None
+    if cmd == "auto-set-cal":
+        if len(args) < 3:
+            print("Usage: brightness-ctl auto-set-cal <min> <max>", file=sys.stderr)
+            return 1
+        try:
+            send_args = {"cal_min": float(args[1]), "cal_max": float(args[2])}
+        except ValueError:
+            print("Error: min and max must be numbers", file=sys.stderr)
+            return 1
+
     try:
-        resp = send_command(socket_path, cmd)
+        resp = send_command(socket_path, cmd, args=send_args)
     except FileNotFoundError:
         print("Error: daemon not running (socket not found)", file=sys.stderr)
         return 1
@@ -118,7 +134,10 @@ def main(socket_path: str, args: list[str]) -> int:
 
     if cmd == "status":
         print(format_status(resp))
-    elif cmd == "auto-status":
+    elif cmd in ("auto-status", "auto-set-cal", "auto-calibrate"):
+        if resp.get("status") == "error":
+            print(f"Error: {resp.get('message', 'unknown')}", file=sys.stderr)
+            return 1
         print(format_auto_status(resp))
     elif resp.get("status") == "error":
         print(f"Error: {resp.get('message', 'unknown')}", file=sys.stderr)

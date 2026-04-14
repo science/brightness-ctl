@@ -375,6 +375,55 @@ class TestAutoResetCal:
         assert not any(log_dir.glob("luminance-*.log"))
 
 
+class TestAutoSetCal:
+    """auto-set-cal manually sets calibration min/max."""
+
+    @pytest.mark.asyncio
+    async def test_auto_set_cal_happy_path(self, daemon):
+        resp = await daemon.handle_command({
+            "cmd": "auto-set-cal",
+            "args": {"cal_min": 20.0, "cal_max": 180.0},
+        })
+        assert resp["status"] == "ok"
+        assert resp["cal_min"] == 20.0
+        assert resp["cal_max"] == 180.0
+        assert resp["calibration_ready"] is True
+        assert daemon.state.cal_min == 20.0
+        assert daemon.state.cal_max == 180.0
+
+    @pytest.mark.asyncio
+    async def test_auto_set_cal_bad_range(self, daemon):
+        resp = await daemon.handle_command({
+            "cmd": "auto-set-cal",
+            "args": {"cal_min": 100.0, "cal_max": 105.0},
+        })
+        assert resp["status"] == "error"
+        assert daemon.state.cal_min is None
+
+    @pytest.mark.asyncio
+    async def test_auto_set_cal_min_ge_max(self, daemon):
+        resp = await daemon.handle_command({
+            "cmd": "auto-set-cal",
+            "args": {"cal_min": 180.0, "cal_max": 20.0},
+        })
+        assert resp["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_auto_set_cal_missing_args(self, daemon):
+        resp = await daemon.handle_command({"cmd": "auto-set-cal"})
+        assert resp["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_auto_set_cal_saves_state(self, daemon, tmp_dirs):
+        await daemon.handle_command({
+            "cmd": "auto-set-cal",
+            "args": {"cal_min": 20.0, "cal_max": 180.0},
+        })
+        data = json.loads(tmp_dirs["state_file"].read_text())
+        assert data["cal_min"] == 20.0
+        assert data["cal_max"] == 180.0
+
+
 class TestAnchorUpdates:
     """bright-up/bright-down update anchor when autobrightness is enabled."""
 

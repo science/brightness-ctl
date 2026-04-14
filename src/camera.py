@@ -442,12 +442,25 @@ def open_camera(
 def capture_luminance(handle: CameraHandle, num_frames: int = 4) -> float:
     """Capture multiple frames and return average luminance (0-255).
 
-    Discards first frame after stream-on (warmup zeros). Raises OSError if
-    the camera stops producing frames — a 5-second silence from a 30fps
-    sensor means the fd has gone stale (suspend/resume, USB hotplug, driver
+    Resets the stream before each burst to prevent the Alcor sensor's
+    internal auto-gain from accumulating across reads. Discards first
+    frame after stream-on (warmup zeros). Raises OSError if the camera
+    stops producing frames — a 5-second silence from a 30fps sensor
+    means the fd has gone stale (suspend/resume, USB hotplug, driver
     crash) and the caller needs to reopen rather than keep retrying.
     """
     import select
+
+    # Reset stream to prevent auto-gain accumulation between reads
+    buf_type = ctypes.c_uint32(V4L2_BUF_TYPE_VIDEO_CAPTURE)
+    _ioctl(handle.fd, VIDIOC_STREAMOFF, buf_type)
+    for i in range(len(handle.buffers)):
+        buf = v4l2_buffer()
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE
+        buf.memory = V4L2_MEMORY_MMAP
+        buf.index = i
+        _ioctl(handle.fd, VIDIOC_QBUF, buf)
+    _ioctl(handle.fd, VIDIOC_STREAMON, buf_type)
 
     luminances = []
     frames_captured = 0

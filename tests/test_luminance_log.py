@@ -118,9 +118,14 @@ class TestComputeCalibration:
         assert 93 <= cal_max <= 96
 
     def test_insufficient_data(self):
-        readings = self._make_readings([50.0] * 10)
+        readings = self._make_readings([50.0] * 29)
         result = compute_calibration(readings, pct_lo=5, pct_hi=95)
-        assert result is None  # not enough data (<100 readings)
+        assert result is None  # not enough data (<30 readings)
+
+    def test_thirty_readings_sufficient(self):
+        readings = self._make_readings(range(0, 60, 2))  # 30 values: 0,2,4,...,58
+        result = compute_calibration(readings, pct_lo=5, pct_hi=95)
+        assert result is not None
 
     def test_narrow_range_returns_none(self):
         # 100 readings but all similar values (range < 10)
@@ -140,8 +145,8 @@ class TestComputeCalibration:
         assert cal_min > 5
         assert cal_max < 250
 
-    def test_exact_hundred_readings(self):
-        readings = self._make_readings(range(100))
+    def test_boundary_at_thirty(self):
+        readings = self._make_readings(range(30))
         result = compute_calibration(readings, pct_lo=5, pct_hi=95)
         assert result is not None
 

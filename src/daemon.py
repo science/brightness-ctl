@@ -234,6 +234,9 @@ class Daemon:
         elif cmd == "auto-reset-cal":
             return self._handle_auto_reset_cal()
 
+        elif cmd == "auto-set-cal":
+            return self._handle_auto_set_cal(request.get("args", {}))
+
         elif cmd == "stop":
             self.should_stop = True
             return {"status": "ok", "message": "stopping"}
@@ -292,6 +295,8 @@ class Daemon:
         cal_ok = calibration_ready(self.state.cal_min, self.state.cal_max)
         return {
             "status": "ok",
+            "autobrightness_enabled": self.state.autobrightness_enabled,
+            "anchor_combined": self.state.anchor_combined,
             "cal_min": self.state.cal_min,
             "cal_max": self.state.cal_max,
             "calibration_ready": cal_ok,
@@ -307,6 +312,29 @@ class Daemon:
             for f in self.log_dir.glob("luminance-*.log"):
                 f.unlink()
         return {"status": "ok", "message": "calibration and logs cleared"}
+
+    def _handle_auto_set_cal(self, args: dict) -> dict:
+        try:
+            cal_min = float(args["cal_min"])
+            cal_max = float(args["cal_max"])
+        except (KeyError, TypeError, ValueError):
+            return {"status": "error", "message": "requires cal_min and cal_max (numeric)"}
+        if cal_min >= cal_max:
+            return {"status": "error", "message": "cal_min must be less than cal_max"}
+        if cal_max - cal_min < 10:
+            return {"status": "error", "message": "calibration range must be >= 10"}
+        self.state.cal_min = cal_min
+        self.state.cal_max = cal_max
+        self._save_state()
+        cal_ok = calibration_ready(self.state.cal_min, self.state.cal_max)
+        return {
+            "status": "ok",
+            "autobrightness_enabled": self.state.autobrightness_enabled,
+            "anchor_combined": self.state.anchor_combined,
+            "cal_min": self.state.cal_min,
+            "cal_max": self.state.cal_max,
+            "calibration_ready": cal_ok,
+        }
 
     def _run_calibration(self) -> None:
         """Recompute calibration from luminance logs and update state."""

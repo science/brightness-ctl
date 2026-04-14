@@ -56,9 +56,9 @@ def compute_calibration(
     """Compute calibration min/max using percentile clipping.
 
     Returns (cal_min, cal_max) or None if insufficient data or range.
-    Requires >= 100 readings and percentile range >= 10.
+    Requires >= 30 readings and percentile range >= 10.
     """
-    if len(readings) < 100:
+    if len(readings) < 30:
         return None
 
     values = sorted(r["luminance"] for r in readings)
