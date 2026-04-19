@@ -35,10 +35,15 @@ DEFAULT_CONFIG = {
     "calibration_percentile_lo": 5,
     "calibration_percentile_hi": 95,
     "log_retention_days": 90,
+    # On Cinnamon ScreenSaver.ActiveChanged=True, drive all monitors to
+    # the chosen DPMS state (default "standby" — "off" can fail to wake
+    # reliably after suspend/resume on some GPUs).
+    "screensaver_monitor_off": True,
+    "screensaver_dpms_mode": "standby",
 }
 
 # Keys that are strings (not ints) in the config
-_STRING_KEYS = {"method", "camera_device"}
+_STRING_KEYS = {"method", "camera_device", "screensaver_dpms_mode"}
 
 # Mapping from bash VAR_NAME to toml key_name
 _BASH_KEY_MAP = {k.upper(): k for k in DEFAULT_CONFIG}

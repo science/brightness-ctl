@@ -75,3 +75,28 @@ class TestSubprocessBackendCommands:
         # sw_brightness=10 → 0.10, sw_brightness=100 → 1.00
         cmd = SubprocessBackend._build_apply_cmd(2800, 0.10, "randr")
         assert "0.10:0.10" in cmd[-1] or "0.1:0.1" in cmd[-1]
+
+
+class TestDpms:
+    """DPMS power control — via `xset dpms force <state>`."""
+
+    def test_mock_set_dpms_records_call(self):
+        backend = MockHardwareBackend()
+        backend.set_dpms("standby")
+        assert backend.calls[0] == ("set_dpms", "standby")
+
+    def test_mock_set_dpms_multiple_states(self):
+        backend = MockHardwareBackend()
+        backend.set_dpms("standby")
+        backend.set_dpms("on")
+        assert backend.calls == [("set_dpms", "standby"), ("set_dpms", "on")]
+
+    def test_subprocess_backend_builds_dpms_cmd_standby(self):
+        from hardware import SubprocessBackend
+        cmd = SubprocessBackend._build_dpms_cmd("standby")
+        assert cmd == ["xset", "dpms", "force", "standby"]
+
+    def test_subprocess_backend_builds_dpms_cmd_on(self):
+        from hardware import SubprocessBackend
+        cmd = SubprocessBackend._build_dpms_cmd("on")
+        assert cmd == ["xset", "dpms", "force", "on"]

@@ -16,6 +16,7 @@ from config import load_config
 from hardware import MockHardwareBackend, SubprocessBackend
 from luminance_log import append_reading, load_readings, compute_calibration, rotate_logs
 from notify import build_notify_cmd, load_notify_id, save_notify_id
+from screensaver import ScreensaverWatcher
 from state import AppState, load_state, save_state
 
 
@@ -45,6 +46,8 @@ class Daemon:
         self._last_ambient_pct: float | None = None
         self._last_log_rotation: datetime | None = None
         self._last_luminance_log: datetime | None = None
+        self._screensaver_task: asyncio.Task | None = None
+        self._screensaver_watcher: ScreensaverWatcher | None = None
 
     def _save_state(self) -> None:
         save_state(self.state, self.state_path)
@@ -375,6 +378,31 @@ class Daemon:
             self._ambient_task.cancel()
             self._ambient_task = None
 
+    async def _on_screensaver_active(self, active: bool) -> None:
+        """ScreenSaver.ActiveChanged callback — drive DPMS state."""
+        mode = self.config["screensaver_dpms_mode"] if active else "on"
+        if isinstance(self.backend, SubprocessBackend):
+            await self.backend.async_set_dpms(mode)
+        else:
+            self.backend.set_dpms(mode)
+
+    def _start_screensaver_task(self) -> None:
+        """Start the Cinnamon ScreenSaver ActiveChanged watcher."""
+        self._stop_screensaver_task()
+        self._screensaver_watcher = ScreensaverWatcher(
+            on_active=self._on_screensaver_active,
+        )
+        self._screensaver_task = asyncio.create_task(
+            self._screensaver_watcher.run()
+        )
+
+    def _stop_screensaver_task(self) -> None:
+        """Cancel the screensaver watcher task if running."""
+        if self._screensaver_task is not None:
+            self._screensaver_task.cancel()
+            self._screensaver_task = None
+        self._screensaver_watcher = None
+
     async def _ambient_light_loop(self) -> None:
         """Periodic camera read + auto-brightness adjustment."""
         from camera import (
@@ -590,6 +618,10 @@ class Daemon:
         if self.state.autobrightness_enabled:
             self._start_ambient_task()
 
+        # Start screensaver→DPMS watcher if enabled
+        if self.config["screensaver_monitor_off"]:
+            self._start_screensaver_task()
+
         # Wait until stop is requested
         try:
             while not self.should_stop:
@@ -600,6 +632,7 @@ class Daemon:
                 await periodic_task
             except asyncio.CancelledError:
                 pass
+            self._stop_screensaver_task()
             server.close()
             await server.wait_closed()
             if self.socket_path.exists():

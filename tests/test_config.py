@@ -41,6 +41,10 @@ class TestDefaults:
         assert DEFAULT_CONFIG["sw_step"] == 5
         assert DEFAULT_CONFIG["sw_min"] == 10
 
+    def test_default_screensaver(self):
+        assert DEFAULT_CONFIG["screensaver_monitor_off"] is True
+        assert DEFAULT_CONFIG["screensaver_dpms_mode"] == "standby"
+
     def test_default_autobrightness(self):
         assert DEFAULT_CONFIG["autobrightness_range"] == 40
         assert DEFAULT_CONFIG["autobrightness_interval"] == 60

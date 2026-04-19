@@ -22,6 +22,9 @@ class HardwareBackend(Protocol):
     def set_hw_brightness(self, display_id: int, value: int) -> None:
         ...
 
+    def set_dpms(self, state: str) -> None:
+        ...
+
 
 class MockHardwareBackend:
     """Records call log for test assertions."""
@@ -41,6 +44,9 @@ class MockHardwareBackend:
 
     def set_hw_brightness(self, display_id: int, value: int) -> None:
         self.calls.append(("set_hw_brightness", display_id, value))
+
+    def set_dpms(self, state: str) -> None:
+        self.calls.append(("set_dpms", state))
 
     def clear(self) -> None:
         self.calls.clear()
@@ -68,6 +74,10 @@ class SubprocessBackend:
     @staticmethod
     def _build_hw_brightness_cmd_by_bus(bus: int, value: int) -> list[str]:
         return ["ddcutil", "--bus", str(bus), "setvcp", "10", str(value), "--noverify"]
+
+    @staticmethod
+    def _build_dpms_cmd(state: str) -> list[str]:
+        return ["xset", "dpms", "force", state]
 
     async def async_apply_color_temp(self, temp: int, brightness: float, method: str) -> None:
         cmd = self._build_apply_cmd(temp, brightness, method)
@@ -97,6 +107,10 @@ class SubprocessBackend:
 
     async def async_set_hw_brightness(self, display_id: int, value: int) -> None:
         cmd = self._build_hw_brightness_cmd(display_id, value)
+        await self._run_cmd(cmd)
+
+    async def async_set_dpms(self, state: str) -> None:
+        cmd = self._build_dpms_cmd(state)
         await self._run_cmd(cmd)
 
     async def _run_cmd(self, cmd: list[str]) -> None:
@@ -140,4 +154,7 @@ class SubprocessBackend:
         pass  # Use async version in daemon
 
     def set_hw_brightness(self, display_id: int, value: int) -> None:
+        pass  # Use async version in daemon
+
+    def set_dpms(self, state: str) -> None:
         pass  # Use async version in daemon
