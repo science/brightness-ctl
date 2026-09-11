@@ -137,6 +137,8 @@ All external tool calls go through a `HardwareBackend` protocol:
 
 **DDC/CI calls MUST be sequential** (not parallel) to avoid I2C bus contention across monitors.
 
+**HW brightness writes are serialized and checked.** `Daemon.apply_hw_brightness` holds `_hw_lock` for the whole write/detect/retry cycle; a request that finds a newer one queued behind it skips, since the newer one applies the latest state. `SubprocessBackend._run_cmd` returns `(exit code, combined stdout+stderr)` — ddcutil 1.4 prints errors such as `Bus /dev/i2c-N not found` on stdout, so capturing stderr alone yields empty messages. On any failed `setvcp` the daemon re-runs `ddcutil detect` (bus numbers go stale on replug, and the startup detect can come back empty before i2c ACLs are granted at login) and retries once, then surfaces the failure via stderr + notify-send. Never go back to discarding ddcutil exit codes — that hid a dead HW brightness path for three weeks.
+
 ### Camera (V4L2)
 
 - Ambient sensor: Alcor Micro **USB 058f:5608** (`ALCOR_AMBIENT_VIDPID`)
@@ -173,7 +175,7 @@ When the user adjusts brightness via `bright-up`/`bright-down` while auto-bright
 2. **Never run parallel ddcutil commands** — sequential only to prevent I2C bus contention.
 3. **Never use pip/venv for runtime** — all runtime dependencies are Python 3.12 stdlib (asyncio, tomllib, ctypes, fcntl, mmap, json, struct, socket, subprocess).
 4. **Never block the asyncio event loop** — use `create_subprocess_exec` for external tools, never `subprocess.run`.
-5. **Never hardcode display count** — always detect via `ddcutil detect` (cached at startup, refreshed on SIGHUP).
+5. **Never hardcode display count** — always detect via `ddcutil detect` (cached at startup; re-detected when the cache is empty or a write fails — there is no SIGHUP handler; restart the service to force a refresh).
 6. **Never apply color temp and brightness separately** — always in a single `gammastep` call to prevent flickering.
 
 ## Dependencies

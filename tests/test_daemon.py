@@ -9,7 +9,7 @@ import pytest
 
 from autobrightness import to_combined
 from daemon import Daemon
-from hardware import MockHardwareBackend
+from hardware import MockHardwareBackend, SubprocessBackend
 from config import DEFAULT_CONFIG
 from state import AppState
 
@@ -178,6 +178,186 @@ class TestApply:
         assert hw_calls[0][1] == 1
         assert hw_calls[1][1] == 2
         assert hw_calls[2][1] == 3
+
+
+class FakeSubprocessBackend(SubprocessBackend):
+    """SubprocessBackend with detect/setvcp stubbed — exercises the daemon's
+    real-backend code path without spawning ddcutil."""
+
+    def __init__(self, detect_results, set_results=None, set_delay=0.0):
+        super().__init__()
+        self._detect_results = list(detect_results)
+        self._set_results = list(set_results or [])
+        self.set_delay = set_delay
+        self.detect_calls = 0
+        self.hw_calls: list[tuple[list[dict], int]] = []
+        self.inflight = 0
+        self.max_inflight = 0
+
+    async def async_detect_displays(self) -> list[dict]:
+        self.detect_calls += 1
+        displays = self._detect_results.pop(0) if self._detect_results else []
+        self._displays = displays
+        return displays
+
+    async def async_set_hw_brightness_parallel(self, displays, value):
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            if self.set_delay:
+                await asyncio.sleep(self.set_delay)
+            self.hw_calls.append((list(displays), value))
+            return self._set_results.pop(0) if self._set_results else []
+        finally:
+            self.inflight -= 1
+
+
+class TestHwDisplayRedetect:
+    """A startup `ddcutil detect` that found nothing (e.g. i2c ACLs not yet
+    granted at login) must not leave HW brightness permanently dead."""
+
+    def _make(self, tmp_dirs, fake):
+        return Daemon(
+            config_path=tmp_dirs["config_file"],
+            state_path=tmp_dirs["state_file"],
+            socket_path=tmp_dirs["socket_path"],
+            backend=fake,
+        )
+
+    def _capture_notes(self, d) -> list[str]:
+        notes: list[str] = []
+
+        async def fake_notify(msg):
+            notes.append(msg)
+
+        d._notify = fake_notify
+        return notes
+
+    @pytest.mark.asyncio
+    async def test_redetects_when_cached_displays_empty(self, tmp_dirs):
+        found = [{"id": 1, "bus": 3}, {"id": 2, "bus": 4}]
+        fake = FakeSubprocessBackend([found])
+        d = self._make(tmp_dirs, fake)
+        d._displays = []  # startup detect came back empty
+        d.state.hw_brightness = 40
+        await d.apply_hw_brightness()
+        assert fake.detect_calls == 1
+        assert fake.hw_calls == [(found, 40)]
+        assert d._displays == found
+
+    @pytest.mark.asyncio
+    async def test_cached_displays_not_redetected(self, tmp_dirs):
+        fake = FakeSubprocessBackend([])
+        d = self._make(tmp_dirs, fake)
+        d._displays = [{"id": 1, "bus": 3}]
+        d.state.hw_brightness = 40
+        await d.apply_hw_brightness()
+        assert fake.detect_calls == 0
+        assert fake.hw_calls == [([{"id": 1, "bus": 3}], 40)]
+
+    @pytest.mark.asyncio
+    async def test_surfaces_error_when_still_no_displays(self, tmp_dirs, capsys):
+        fake = FakeSubprocessBackend([[]])
+        d = self._make(tmp_dirs, fake)
+        d._displays = []
+        notes = self._capture_notes(d)
+        await d.apply_hw_brightness()
+        assert fake.hw_calls == []
+        assert any("no DDC/CI displays" in n for n in notes)
+        assert "no DDC/CI displays" in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    async def test_no_displays_message_includes_detect_error(self, tmp_dirs):
+        fake = FakeSubprocessBackend([[]])
+        fake.last_detect_error = "Permission denied: /dev/i2c-3"
+        d = self._make(tmp_dirs, fake)
+        d._displays = []
+        notes = self._capture_notes(d)
+        await d.apply_hw_brightness()
+        assert any("Permission denied: /dev/i2c-3" in n for n in notes)
+
+
+class TestHwWriteFailures:
+    """A failed ddcutil write (stale bus number, monitor not answering) is
+    retried once after re-detecting, and surfaced if it still fails."""
+
+    _make = TestHwDisplayRedetect._make
+    _capture_notes = TestHwDisplayRedetect._capture_notes
+
+    @pytest.mark.asyncio
+    async def test_failed_write_redetects_and_retries(self, tmp_dirs):
+        stale = [{"id": 1, "bus": 3}]
+        fresh = [{"id": 1, "bus": 6}]
+        fake = FakeSubprocessBackend(
+            [fresh], set_results=[[(stale[0], "Bus /dev/i2c-3 not found")], []]
+        )
+        d = self._make(tmp_dirs, fake)
+        d._displays = stale
+        d.state.hw_brightness = 40
+        notes = self._capture_notes(d)
+        await d.apply_hw_brightness()
+        assert fake.detect_calls == 1
+        assert fake.hw_calls == [(stale, 40), (fresh, 40)]
+        assert d._displays == fresh
+        assert notes == []
+
+    @pytest.mark.asyncio
+    async def test_persistent_failure_is_surfaced(self, tmp_dirs, capsys):
+        displays = [{"id": 1, "bus": 3}, {"id": 2, "bus": 4}]
+        fail = [(displays[1], "DDC communication failed")]
+        fake = FakeSubprocessBackend([displays], set_results=[fail, fail])
+        d = self._make(tmp_dirs, fake)
+        d._displays = displays
+        d.state.hw_brightness = 40
+        notes = self._capture_notes(d)
+        await d.apply_hw_brightness()
+        assert len(fake.hw_calls) == 2  # original + exactly one retry
+        assert any("bus 4" in n and "DDC communication failed" in n for n in notes)
+        err = capsys.readouterr().err
+        assert "bus 4" in err and "DDC communication failed" in err
+
+    @pytest.mark.asyncio
+    async def test_success_does_not_redetect_or_notify(self, tmp_dirs):
+        displays = [{"id": 1, "bus": 3}]
+        fake = FakeSubprocessBackend([], set_results=[[]])
+        d = self._make(tmp_dirs, fake)
+        d._displays = displays
+        notes = self._capture_notes(d)
+        await d.apply_hw_brightness()
+        assert fake.detect_calls == 0
+        assert len(fake.hw_calls) == 1
+        assert notes == []
+
+
+class TestHwIoLock:
+    """HW brightness I/O is serialized: rapid hotkey presses must not run
+    overlapping ddcutil writes/detects on the same buses."""
+
+    _make = TestHwDisplayRedetect._make
+
+    @pytest.mark.asyncio
+    async def test_concurrent_applies_never_overlap(self, tmp_dirs):
+        fake = FakeSubprocessBackend([], set_delay=0.02)
+        d = self._make(tmp_dirs, fake)
+        d._displays = [{"id": 1, "bus": 3}]
+        await asyncio.gather(*(d.apply_hw_brightness() for _ in range(3)))
+        assert fake.max_inflight == 1
+
+    @pytest.mark.asyncio
+    async def test_queued_requests_coalesce_to_latest(self, tmp_dirs):
+        fake = FakeSubprocessBackend([], set_delay=0.02)
+        d = self._make(tmp_dirs, fake)
+        d._displays = [{"id": 1, "bus": 3}]
+        d.state.hw_brightness = 10
+        first = asyncio.create_task(d.apply_hw_brightness())
+        await asyncio.sleep(0)  # first write is now in flight
+        d.state.hw_brightness = 20
+        second = asyncio.create_task(d.apply_hw_brightness())
+        d.state.hw_brightness = 30
+        third = asyncio.create_task(d.apply_hw_brightness())
+        await asyncio.gather(first, second, third)
+        # The in-flight write finishes; of the queued ones only the newest runs.
+        assert [v for _, v in fake.hw_calls] == [10, 30]
 
 
 class TestStatePersistence:

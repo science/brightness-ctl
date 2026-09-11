@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +40,8 @@ class Daemon:
         self.should_stop = False
         self.notify_id: int | None = load_notify_id()
         self._displays: list[dict] | None = None
+        self._hw_lock = asyncio.Lock()
+        self._hw_generation = 0
         self._debounce_handle: asyncio.TimerHandle | None = None
         self.log_dir = config_path.parent / "luminance-logs"
         self._camera_handle = None
@@ -82,13 +85,62 @@ class Daemon:
             self.backend.apply_color_temp(applied, sw_dec, self.config["method"])
 
     async def apply_hw_brightness(self) -> None:
-        """Set hardware brightness on all displays in parallel (by bus ID)."""
-        displays = self._displays or self.backend.detect_displays()
-        if isinstance(self.backend, SubprocessBackend):
-            await self.backend.async_set_hw_brightness_parallel(displays, self.state.hw_brightness)
-        else:
-            for d in displays:
-                self.backend.set_hw_brightness(d["id"], self.state.hw_brightness)
+        """Set hardware brightness on all displays in parallel (by bus ID).
+
+        Serialized by `_hw_lock` so rapid hotkey presses never run overlapping
+        ddcutil calls. A request that finds a newer one queued behind it skips:
+        the newer one reads the latest state when it runs.
+        """
+        self._hw_generation += 1
+        generation = self._hw_generation
+        async with self._hw_lock:
+            if generation != self._hw_generation:
+                return
+            if isinstance(self.backend, SubprocessBackend):
+                await self._apply_hw_brightness_subprocess(self.state.hw_brightness)
+            else:
+                displays = self._displays or self.backend.detect_displays()
+                for d in displays:
+                    self.backend.set_hw_brightness(d["id"], self.state.hw_brightness)
+
+    async def _apply_hw_brightness_subprocess(self, value: int) -> None:
+        """Write via ddcutil; re-detect when the cache is empty or a write fails.
+
+        The startup `ddcutil detect` can come back empty (i2c ACLs not yet
+        granted at login), and cached bus numbers go stale when monitors are
+        replugged. One re-detect + retry recovers from both. Anything still
+        failing is surfaced — discarded ddcutil errors once left HW brightness
+        silently dead for weeks.
+        """
+        if not self._displays:
+            self._displays = await self.backend.async_detect_displays()
+        failures: list[tuple[dict, str]] = []
+        if self._displays:
+            failures = await self.backend.async_set_hw_brightness_parallel(self._displays, value)
+            if not failures:
+                return
+            self._displays = await self.backend.async_detect_displays()
+            if self._displays:
+                failures = await self.backend.async_set_hw_brightness_parallel(
+                    self._displays, value
+                )
+                if not failures:
+                    return
+        if not self._displays:
+            msg = "no DDC/CI displays detected — HW brightness not applied"
+            if self.backend.last_detect_error:
+                msg += f" ({self.backend.last_detect_error.splitlines()[0]})"
+            await self._report_hw_error(msg)
+            return
+        details = []
+        for d, err in failures:
+            label = f"bus {d['bus']}" if d.get("bus") is not None else f"display {d['id']}"
+            details.append(f"{label}: {err.splitlines()[0] if err else 'ddcutil failed'}")
+        await self._report_hw_error(f"HW {value}% failed — {'; '.join(details)}")
+
+    async def _report_hw_error(self, msg: str) -> None:
+        print(f"brightness-ctl: {msg}", file=sys.stderr, flush=True)
+        await self._notify(f"Brightness: {msg}")
 
     def apply_hw_brightness_background(self) -> None:
         """Fire-and-forget HW brightness apply (notification sent first)."""

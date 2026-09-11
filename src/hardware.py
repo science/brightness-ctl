@@ -57,6 +57,7 @@ class SubprocessBackend:
 
     def __init__(self):
         self._displays: list[dict] | None = None
+        self.last_detect_error = ""
 
     @staticmethod
     def _build_apply_cmd(temp: int, brightness: float, method: str) -> list[str]:
@@ -93,17 +94,23 @@ class SubprocessBackend:
         )
         await proc.wait()
 
-    async def async_set_hw_brightness_parallel(self, displays: list[dict], value: int) -> None:
-        """Set HW brightness on all displays in parallel using bus IDs."""
-        tasks = []
+    async def async_set_hw_brightness_parallel(
+        self, displays: list[dict], value: int
+    ) -> list[tuple[dict, str]]:
+        """Set HW brightness on all displays in parallel using bus IDs.
+
+        Returns (display, output) for each display whose ddcutil call exited
+        non-zero; an empty list means every write succeeded.
+        """
+        cmds = []
         for d in displays:
             bus = d.get("bus")
             if bus is not None:
-                cmd = self._build_hw_brightness_cmd_by_bus(bus, value)
+                cmds.append(self._build_hw_brightness_cmd_by_bus(bus, value))
             else:
-                cmd = self._build_hw_brightness_cmd(d["id"], value)
-            tasks.append(self._run_cmd(cmd))
-        await asyncio.gather(*tasks)
+                cmds.append(self._build_hw_brightness_cmd(d["id"], value))
+        results = await asyncio.gather(*(self._run_cmd(c) for c in cmds))
+        return [(d, out) for d, (rc, out) in zip(displays, results) if rc != 0]
 
     async def async_set_hw_brightness(self, display_id: int, value: int) -> None:
         cmd = self._build_hw_brightness_cmd(display_id, value)
@@ -113,21 +120,27 @@ class SubprocessBackend:
         cmd = self._build_dpms_cmd(state)
         await self._run_cmd(cmd)
 
-    async def _run_cmd(self, cmd: list[str]) -> None:
+    async def _run_cmd(self, cmd: list[str]) -> tuple[int, str]:
+        """Run cmd; return (exit code, stripped stdout+stderr).
+
+        Both streams are kept because ddcutil 1.4 prints errors on stdout.
+        """
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
-        await proc.wait()
+        out, _ = await proc.communicate()
+        return proc.returncode, out.decode(errors="replace").strip()
 
     async def async_detect_displays(self) -> list[dict]:
         proc = await asyncio.create_subprocess_exec(
             "ddcutil", "detect",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        stdout, _ = await proc.communicate()
+        stdout, stderr = await proc.communicate()
+        out = stdout.decode(errors="replace")
         displays = []
         current_id = None
-        for line in stdout.decode().splitlines():
+        for line in out.splitlines():
             if line.startswith("Display "):
                 try:
                     current_id = int(line.split()[1])
@@ -138,6 +151,10 @@ class SubprocessBackend:
                 if bus_match:
                     displays.append({"id": current_id, "bus": int(bus_match.group(1))})
                     current_id = None
+        # ddcutil 1.4 explains a failed detect on stdout, so fall back to it.
+        self.last_detect_error = (
+            "" if displays else (stderr.decode(errors="replace").strip() or out.strip())
+        )
         self._displays = displays
         return displays
 
