@@ -18,6 +18,10 @@ DEFAULT_CONFIG = {
     "hw_step": 5,
     "sw_step": 5,
     "sw_min": 10,
+    # Seconds after the most recent bright-up/bright-down before re-running
+    # `ddcutil detect` to pick up monitors powered back on. Long enough that
+    # it never runs mid-burst or while the user is still judging brightness.
+    "hw_redetect_delay": 15,
     "autobrightness_range": 40,
     "autobrightness_interval": 60,
     "luminance_log_interval": 1800,

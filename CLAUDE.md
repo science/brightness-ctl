@@ -139,6 +139,10 @@ All external tool calls go through a `HardwareBackend` protocol:
 
 **HW brightness writes are serialized and checked.** `Daemon.apply_hw_brightness` holds `_hw_lock` for the whole write/detect/retry cycle; a request that finds a newer one queued behind it skips, since the newer one applies the latest state. `SubprocessBackend._run_cmd` returns `(exit code, combined stdout+stderr)` — ddcutil 1.4 prints errors such as `Bus /dev/i2c-N not found` on stdout, so capturing stderr alone yields empty messages. On any failed `setvcp` the daemon re-runs `ddcutil detect` (bus numbers go stale on replug, and the startup detect can come back empty before i2c ACLs are granted at login) and retries once, then surfaces the failure via stderr + notify-send. Never go back to discarding ddcutil exit codes — that hid a dead HW brightness path for three weeks.
 
+**Monitor reinventory after hotkey bursts.** `ddcutil detect` lists a powered-off (but still cabled) monitor as `Invalid display`, so it drops out of `_displays`, and successful writes to the remaining monitors never re-add it. Each `bright-up`/`bright-down` (re)arms a timer `hw_redetect_delay` seconds (default 15) after the most recent press; when it fires, `_redetect_displays` re-runs detect under `_hw_lock` and writes the current brightness to any newly found monitor. The delay is deliberately long: hotkey presses come in 1–2s bursts with pauses to judge brightness, and a press landing during the ~1s detect has its write delayed. Skipped while the screensaver is active (DPMS standby can make detect drop every monitor). Only hotkey presses schedule it — not the ambient loop.
+
+Monitor names differ between layers on this NVIDIA host: Cinnamon's Display applet shows X RandR output names (e.g. `DP-4`), while ddcutil shows kernel DRM connector names (e.g. `card1-DP-3`) for the same monitor. Map them by EDID serial, never by name.
+
 ### Camera (V4L2)
 
 - Ambient sensor: Alcor Micro **USB 058f:5608** (`ALCOR_AMBIENT_VIDPID`)
@@ -175,7 +179,7 @@ When the user adjusts brightness via `bright-up`/`bright-down` while auto-bright
 2. **Never run parallel ddcutil commands** — sequential only to prevent I2C bus contention.
 3. **Never use pip/venv for runtime** — all runtime dependencies are Python 3.12 stdlib (asyncio, tomllib, ctypes, fcntl, mmap, json, struct, socket, subprocess).
 4. **Never block the asyncio event loop** — use `create_subprocess_exec` for external tools, never `subprocess.run`.
-5. **Never hardcode display count** — always detect via `ddcutil detect` (cached at startup; re-detected when the cache is empty or a write fails — there is no SIGHUP handler; restart the service to force a refresh).
+5. **Never hardcode display count** — always detect via `ddcutil detect` (cached at startup; re-detected when the cache is empty, when a write fails, and `hw_redetect_delay` seconds after the last hotkey press — there is no SIGHUP handler; restart the service to force an immediate refresh).
 6. **Never apply color temp and brightness separately** — always in a single `gammastep` call to prevent flickering.
 
 ## Dependencies

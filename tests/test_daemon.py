@@ -184,21 +184,40 @@ class FakeSubprocessBackend(SubprocessBackend):
     """SubprocessBackend with detect/setvcp stubbed — exercises the daemon's
     real-backend code path without spawning ddcutil."""
 
-    def __init__(self, detect_results, set_results=None, set_delay=0.0):
+    def __init__(self, detect_results, set_results=None, set_delay=0.0, detect_delay=0.0):
         super().__init__()
         self._detect_results = list(detect_results)
         self._set_results = list(set_results or [])
         self.set_delay = set_delay
+        self.detect_delay = detect_delay
         self.detect_calls = 0
         self.hw_calls: list[tuple[list[dict], int]] = []
+        self.dpms_calls: list[str] = []
         self.inflight = 0
         self.max_inflight = 0
 
     async def async_detect_displays(self) -> list[dict]:
         self.detect_calls += 1
-        displays = self._detect_results.pop(0) if self._detect_results else []
-        self._displays = displays
-        return displays
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            if self.detect_delay:
+                await asyncio.sleep(self.detect_delay)
+            displays = self._detect_results.pop(0) if self._detect_results else []
+            self._displays = displays
+            return displays
+        finally:
+            self.inflight -= 1
+
+    # Never let a test reach real gammastep / xset.
+    async def async_apply_color_temp(self, temp, brightness, method) -> None:
+        pass
+
+    async def async_reset_color_temp(self, method) -> None:
+        pass
+
+    async def async_set_dpms(self, state) -> None:
+        self.dpms_calls.append(state)
 
     async def async_set_hw_brightness_parallel(self, displays, value):
         self.inflight += 1
@@ -358,6 +377,112 @@ class TestHwIoLock:
         await asyncio.gather(first, second, third)
         # The in-flight write finishes; of the queued ones only the newest runs.
         assert [v for _, v in fake.hw_calls] == [10, 30]
+
+
+class TestHwRedetectTimer:
+    """Hotkey presses schedule a monitor reinventory `hw_redetect_delay` seconds
+    after the most recent press. A burst of presses never runs `ddcutil detect`;
+    once it ends, a monitor powered back on rejoins the write set."""
+
+    _make = TestHwDisplayRedetect._make
+    _capture_notes = TestHwDisplayRedetect._capture_notes
+
+    def _pressable(self, tmp_dirs, fake, delay):
+        d = self._make(tmp_dirs, fake)
+        d.config["hw_redetect_delay"] = delay
+        d._displays = [{"id": 1, "bus": 3}]
+        # sw at 100 so bright-up/down take the HW path.
+        d.state.sw_brightness = 100
+        d.state.hw_brightness = 50
+        self._capture_notes(d)
+        return d
+
+    @pytest.mark.asyncio
+    async def test_press_schedules_redetect_after_delay(self, tmp_dirs):
+        fake = FakeSubprocessBackend([[{"id": 1, "bus": 3}]])
+        d = self._pressable(tmp_dirs, fake, 0.1)
+        await d.handle_command({"cmd": "bright-up"})
+        await asyncio.sleep(0.03)
+        assert fake.detect_calls == 0
+        await asyncio.sleep(0.2)
+        assert fake.detect_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_each_press_pushes_redetect_out(self, tmp_dirs):
+        fake = FakeSubprocessBackend([[{"id": 1, "bus": 3}]])
+        d = self._pressable(tmp_dirs, fake, 0.2)
+        await d.handle_command({"cmd": "bright-up"})
+        await asyncio.sleep(0.12)
+        await d.handle_command({"cmd": "bright-down"})
+        await asyncio.sleep(0.12)  # 0.24s after the first press, 0.12s after the last
+        assert fake.detect_calls == 0
+        await asyncio.sleep(0.2)
+        assert fake.detect_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_direct_apply_does_not_schedule(self, tmp_dirs):
+        # The ambient loop calls apply_hw_brightness directly and may run while
+        # monitors sit in DPMS standby, so only hotkey presses schedule.
+        fake = FakeSubprocessBackend([[{"id": 1, "bus": 3}]])
+        d = self._pressable(tmp_dirs, fake, 0.05)
+        await d.apply_hw_brightness()
+        await asyncio.sleep(0.15)
+        assert fake.detect_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_redetect_writes_current_brightness_to_returning_monitor(self, tmp_dirs):
+        all3 = [{"id": 1, "bus": 3}, {"id": 2, "bus": 4}, {"id": 3, "bus": 5}]
+        fake = FakeSubprocessBackend([list(all3)])
+        d = self._make(tmp_dirs, fake)
+        d._displays = [all3[0], all3[2]]  # bus 4 dropped while powered off
+        d.state.hw_brightness = 40
+        await d._redetect_displays()
+        assert d._displays == all3
+        assert fake.hw_calls == [([all3[1]], 40)]
+
+    @pytest.mark.asyncio
+    async def test_redetect_without_changes_writes_nothing(self, tmp_dirs):
+        displays = [{"id": 1, "bus": 3}, {"id": 2, "bus": 5}]
+        fake = FakeSubprocessBackend([list(displays)])
+        d = self._make(tmp_dirs, fake)
+        d._displays = list(displays)
+        await d._redetect_displays()
+        assert fake.detect_calls == 1
+        assert fake.hw_calls == []
+
+    @pytest.mark.asyncio
+    async def test_redetect_drops_monitor_no_longer_detected(self, tmp_dirs):
+        all3 = [{"id": 1, "bus": 3}, {"id": 2, "bus": 4}, {"id": 3, "bus": 5}]
+        fake = FakeSubprocessBackend([[all3[0], all3[2]]])
+        d = self._make(tmp_dirs, fake)
+        d._displays = list(all3)
+        await d._redetect_displays()
+        assert d._displays == [all3[0], all3[2]]
+        assert fake.hw_calls == []
+
+    @pytest.mark.asyncio
+    async def test_redetect_skipped_while_screensaver_active(self, tmp_dirs):
+        fake = FakeSubprocessBackend([[{"id": 1, "bus": 3}]])
+        d = self._make(tmp_dirs, fake)
+        d._displays = [{"id": 1, "bus": 3}]
+        await d._on_screensaver_active(True)
+        await d._redetect_displays()
+        assert fake.detect_calls == 0
+        await d._on_screensaver_active(False)
+        await d._redetect_displays()
+        assert fake.detect_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_redetect_holds_hw_lock(self, tmp_dirs):
+        fake = FakeSubprocessBackend(
+            [[{"id": 1, "bus": 3}]], set_delay=0.02, detect_delay=0.02
+        )
+        d = self._make(tmp_dirs, fake)
+        d._displays = [{"id": 1, "bus": 3}]
+        await asyncio.gather(d._redetect_displays(), d.apply_hw_brightness())
+        assert fake.max_inflight == 1
+        assert fake.detect_calls == 1
+        assert len(fake.hw_calls) == 1
 
 
 class TestStatePersistence:

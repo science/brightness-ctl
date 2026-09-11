@@ -42,6 +42,8 @@ class Daemon:
         self._displays: list[dict] | None = None
         self._hw_lock = asyncio.Lock()
         self._hw_generation = 0
+        self._redetect_handle: asyncio.TimerHandle | None = None
+        self._screensaver_active = False
         self._debounce_handle: asyncio.TimerHandle | None = None
         self.log_dir = config_path.parent / "luminance-logs"
         self._camera_handle = None
@@ -161,9 +163,46 @@ class Daemon:
         except OSError:
             pass
 
+    def _schedule_redetect(self) -> None:
+        """(Re)arm the monitor reinventory `hw_redetect_delay` seconds from now.
+
+        Every hotkey press pushes it out again, so `ddcutil detect` (~1s, ~1.8s
+        with a monitor off) never runs mid-burst — only once the user is done.
+        """
+        if self._redetect_handle is not None:
+            self._redetect_handle.cancel()
+        self._redetect_handle = asyncio.get_running_loop().call_later(
+            self.config["hw_redetect_delay"],
+            lambda: asyncio.ensure_future(self._redetect_displays()),
+        )
+
+    async def _redetect_displays(self) -> None:
+        """Re-run `ddcutil detect`; write current brightness to new monitors.
+
+        Detect lists a powered-off monitor as "Invalid display", so it drops
+        out of the cache while off and nothing else re-adds it once it's back
+        on. Skipped while the screensaver has monitors in DPMS standby, where
+        detect could drop them all.
+        """
+        self._redetect_handle = None
+        if self._screensaver_active or not isinstance(self.backend, SubprocessBackend):
+            return
+        async with self._hw_lock:
+            known = {d.get("bus") for d in self._displays or []}
+            self._displays = await self.backend.async_detect_displays()
+            added = [d for d in self._displays if d.get("bus") not in known]
+            if added:
+                # Failures aren't reported here: the next hotkey press writes
+                # every monitor and surfaces them via the retry path.
+                await self.backend.async_set_hw_brightness_parallel(
+                    added, self.state.hw_brightness
+                )
+
     async def handle_command(self, request: dict) -> dict:
         """Dispatch a command and return a response dict."""
         cmd = request.get("cmd", "")
+        if cmd in ("bright-up", "bright-down"):
+            self._schedule_redetect()
 
         if cmd == "warmer":
             if not self.state.enabled:
@@ -432,6 +471,7 @@ class Daemon:
 
     async def _on_screensaver_active(self, active: bool) -> None:
         """ScreenSaver.ActiveChanged callback — drive DPMS state."""
+        self._screensaver_active = active
         mode = self.config["screensaver_dpms_mode"] if active else "on"
         if isinstance(self.backend, SubprocessBackend):
             await self.backend.async_set_dpms(mode)
