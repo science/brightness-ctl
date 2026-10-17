@@ -1,9 +1,18 @@
 """notify-send wrapper with replace-id persistence."""
 
+import os
 from pathlib import Path
 
+
+def default_notify_id_file() -> Path:
+    """Per-user replace-id file in $XDG_RUNTIME_DIR (never shared /tmp, which
+    collides when more than one user on the machine runs the daemon)."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return Path(runtime_dir) / "brightness-ctl-notify-id"
+
+
 # Persist replace-id so notifications don't stack across daemon restarts
-_NOTIFY_ID_FILE = Path("/tmp/brightness-ctl-notify-id")
+_NOTIFY_ID_FILE = default_notify_id_file()
 
 
 def load_notify_id() -> int | None:

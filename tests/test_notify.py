@@ -1,6 +1,11 @@
 """Tests for notify.py — command construction and replace-id persistence."""
 
-from notify import build_notify_cmd, load_notify_id, save_notify_id, _NOTIFY_ID_FILE
+import os
+from pathlib import Path
+
+from notify import (
+    build_notify_cmd, default_notify_id_file, load_notify_id, save_notify_id,
+)
 
 
 class TestBuildNotifyCmd:
@@ -63,3 +68,17 @@ class TestNotifyIdPersistence:
         id_file.write_text("not-a-number")
         monkeypatch.setattr("notify._NOTIFY_ID_FILE", id_file)
         assert load_notify_id() is None
+
+
+class TestNotifyIdLocation:
+    """The id file is per-user. A fixed /tmp path is owned by whichever user's
+    daemon created it first, so a second user's daemon can never save its id."""
+
+    def test_lives_in_xdg_runtime_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        assert default_notify_id_file() == tmp_path / "brightness-ctl-notify-id"
+
+    def test_falls_back_to_run_user_uid(self, monkeypatch):
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        expected = Path(f"/run/user/{os.getuid()}") / "brightness-ctl-notify-id"
+        assert default_notify_id_file() == expected
