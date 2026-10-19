@@ -24,6 +24,7 @@ import ctypes.util
 import fcntl
 import mmap
 import os
+import stat
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,11 @@ BLOCKED_VIDPIDS: set[tuple[str, str]] = {
 }
 
 _DEFAULT_SYSFS_ROOT = Path("/sys/class/video4linux")
+
+# On bambam a udev rule (yadm hardware/ambient-camera-private) creates a
+# user-owned twin of each Alcor node here and deletes the public /dev/videoN,
+# so browsers and Zoom don't list it. See _private_node().
+_DEFAULT_PRIVATE_DIR = Path("/dev/ambient-camera")
 
 
 class CameraError(Exception):
@@ -69,9 +75,33 @@ def _read_usb_vidpid(video_sysfs_entry: Path) -> tuple[str, str] | None:
     return None
 
 
-def scan_v4l2_devices(sysfs_root: Path = _DEFAULT_SYSFS_ROOT) -> list[dict]:
+def _private_node(video_sysfs_entry: Path, private_dir: Path) -> str | None:
+    """Return private_dir/videoN if it is a char device whose MAJOR:MINOR
+    matches /sys/class/video4linux/videoN/dev, else None.
+
+    The rdev check matters: a twin left behind after a replug could point
+    at a minor number the kernel has since handed to the C615.
+    """
+    node = private_dir / video_sysfs_entry.name
+    try:
+        want = (video_sysfs_entry / "dev").read_text().strip()
+        st = os.stat(node)
+    except OSError:
+        return None
+    if not stat.S_ISCHR(st.st_mode):
+        return None
+    if f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}" != want:
+        return None
+    return str(node)
+
+
+def scan_v4l2_devices(
+    sysfs_root: Path = _DEFAULT_SYSFS_ROOT,
+    private_dir: Path = _DEFAULT_PRIVATE_DIR,
+) -> list[dict]:
     """Return [{"node": "/dev/videoN", "vid": "xxxx", "pid": "yyyy"}, ...]
     sorted by node name. Entries without a resolvable USB VID:PID are skipped.
+    "node" is the verified twin under `private_dir` when one exists.
     """
     if not sysfs_root.exists():
         return []
@@ -83,7 +113,7 @@ def scan_v4l2_devices(sysfs_root: Path = _DEFAULT_SYSFS_ROOT) -> list[dict]:
         if vidpid is None:
             continue
         results.append({
-            "node": f"/dev/{entry.name}",
+            "node": _private_node(entry, private_dir) or f"/dev/{entry.name}",
             "vid": vidpid[0],
             "pid": vidpid[1],
         })
@@ -173,6 +203,7 @@ def resolve_camera_device(
     hint: str | None,
     sysfs_root: Path = _DEFAULT_SYSFS_ROOT,
     capture_check=None,
+    private_dir: Path = _DEFAULT_PRIVATE_DIR,
 ) -> str:
     """Scan sysfs and return a safe /dev/videoN path, or raise CameraError.
 
@@ -182,7 +213,7 @@ def resolve_camera_device(
     v4l2 node to `open_camera`. Tests pass `capture_check=None` so they
     can drive selection logic without touching real hardware.
     """
-    entries = scan_v4l2_devices(sysfs_root)
+    entries = scan_v4l2_devices(sysfs_root, private_dir)
     if capture_check is not None:
         entries = [e for e in entries if capture_check(e["node"])]
     return select_camera_device(

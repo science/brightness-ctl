@@ -150,6 +150,8 @@ def _make_fake_sysfs(tmp_path: Path, devices: list[dict]) -> Path:
     """Build a fake /sys/class/video4linux tree for scan tests.
 
     devices: [{"name": "video0", "vid": "058f", "pid": "5608"}, ...]
+    An optional "dev" key ("MAJOR:MINOR") writes videoN/dev, which the
+    scanner uses to verify private device nodes.
     """
     sysfs_class = tmp_path / "sys" / "class" / "video4linux"
     sysfs_class.mkdir(parents=True)
@@ -169,8 +171,17 @@ def _make_fake_sysfs(tmp_path: Path, devices: list[dict]) -> Path:
         video_entry = sysfs_class / dev["name"]
         video_entry.mkdir()
         (video_entry / "device").symlink_to(iface)
+        if "dev" in dev:
+            (video_entry / "dev").write_text(dev["dev"] + "\n")
 
     return sysfs_class
+
+
+def _dev_null_rdev() -> str:
+    """MAJOR:MINOR of /dev/null — a real char device tests can point at."""
+    import os
+    st = os.stat("/dev/null")
+    return f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}"
 
 
 class TestScanV4L2Devices:
@@ -208,6 +219,67 @@ class TestScanV4L2Devices:
         sysfs.mkdir(parents=True)
         (sysfs / "video0").mkdir()  # no device symlink
         assert scan_v4l2_devices(sysfs) == []
+
+
+class TestPrivateNodes:
+    """The host's udev rule creates a user-owned twin of each Alcor node at
+    /dev/ambient-camera/videoN and deletes the public /dev/videoN (so
+    browsers and Zoom can't list it). The scanner prefers the twin, but
+    only when it is a char device with the same MAJOR:MINOR as sysfs reports.
+    """
+
+    def test_matching_private_node_preferred(self, tmp_path):
+        sysfs = _make_fake_sysfs(tmp_path, [
+            {"name": "video0", "vid": "058f", "pid": "5608", "dev": _dev_null_rdev()},
+        ])
+        private = tmp_path / "ambient-camera"
+        private.mkdir()
+        (private / "video0").symlink_to("/dev/null")
+        result = scan_v4l2_devices(sysfs, private_dir=private)
+        assert result == [{"node": str(private / "video0"), "vid": "058f", "pid": "5608"}]
+
+    def test_private_node_with_wrong_rdev_ignored(self, tmp_path):
+        """A stale twin left behind after replug could point at a minor
+        number the kernel has since given to the C615. Never trust it."""
+        sysfs = _make_fake_sysfs(tmp_path, [
+            {"name": "video0", "vid": "058f", "pid": "5608", "dev": "81:0"},
+        ])
+        private = tmp_path / "ambient-camera"
+        private.mkdir()
+        (private / "video0").symlink_to("/dev/null")
+        result = scan_v4l2_devices(sysfs, private_dir=private)
+        assert result[0]["node"] == "/dev/video0"
+
+    def test_private_regular_file_ignored(self, tmp_path):
+        sysfs = _make_fake_sysfs(tmp_path, [
+            {"name": "video0", "vid": "058f", "pid": "5608", "dev": _dev_null_rdev()},
+        ])
+        private = tmp_path / "ambient-camera"
+        private.mkdir()
+        (private / "video0").write_text("not a device")
+        result = scan_v4l2_devices(sysfs, private_dir=private)
+        assert result[0]["node"] == "/dev/video0"
+
+    def test_missing_private_dir_falls_back(self, tmp_path):
+        sysfs = _make_fake_sysfs(tmp_path, [
+            {"name": "video0", "vid": "058f", "pid": "5608", "dev": _dev_null_rdev()},
+        ])
+        result = scan_v4l2_devices(sysfs, private_dir=tmp_path / "nope")
+        assert result[0]["node"] == "/dev/video0"
+
+    def test_resolver_returns_private_node_and_accepts_it_as_hint(self, tmp_path):
+        """open_camera re-resolves with the path it was given as the hint,
+        so the private path must round-trip through the resolver."""
+        sysfs = _make_fake_sysfs(tmp_path, [
+            {"name": "video0", "vid": "058f", "pid": "5608", "dev": _dev_null_rdev()},
+            {"name": "video2", "vid": "046d", "pid": "082c", "dev": "81:2"},
+        ])
+        private = tmp_path / "ambient-camera"
+        private.mkdir()
+        (private / "video0").symlink_to("/dev/null")
+        node = resolve_camera_device(None, sysfs_root=sysfs, private_dir=private)
+        assert node == str(private / "video0")
+        assert resolve_camera_device(node, sysfs_root=sysfs, private_dir=private) == node
 
 
 class TestResolveCameraDevice:
