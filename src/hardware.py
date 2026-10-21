@@ -7,6 +7,24 @@ import re
 from typing import Protocol
 
 
+def parse_dpms_state(xset_q: str) -> str | None:
+    """Return the DPMS level ("On", "Standby", "Suspend", "Off") from `xset q`.
+
+    None when the output has no "Monitor is ..." line (DPMS disabled, or
+    xset couldn't reach the display).
+    """
+    m = re.search(r"Monitor is (?:in )?(\w+)", xset_q)
+    return m.group(1) if m else None
+
+
+def parse_idle_ms(xprintidle_out: str) -> int | None:
+    """Return X input idle time in ms from `xprintidle` output, or None."""
+    try:
+        return int(xprintidle_out.split()[0])
+    except (IndexError, ValueError):
+        return None
+
+
 class HardwareBackend(Protocol):
     """Protocol for hardware interaction (gammastep, ddcutil)."""
 
@@ -25,6 +43,12 @@ class HardwareBackend(Protocol):
     def set_dpms(self, state: str) -> None:
         ...
 
+    def query_idle_ms(self) -> int | None:
+        ...
+
+    def query_dpms_state(self) -> str | None:
+        ...
+
 
 class MockHardwareBackend:
     """Records call log for test assertions."""
@@ -32,6 +56,9 @@ class MockHardwareBackend:
     def __init__(self, num_displays: int = 3):
         self._num_displays = num_displays
         self.calls: list[tuple] = []
+        # Canned answers for the screensaver re-blank check.
+        self.idle_ms: int | None = 0
+        self.dpms_state: str | None = "On"
 
     def detect_displays(self) -> list[dict]:
         return [{"id": i + 1, "bus": i + 3} for i in range(self._num_displays)]
@@ -47,6 +74,12 @@ class MockHardwareBackend:
 
     def set_dpms(self, state: str) -> None:
         self.calls.append(("set_dpms", state))
+
+    def query_idle_ms(self) -> int | None:
+        return self.idle_ms
+
+    def query_dpms_state(self) -> str | None:
+        return self.dpms_state
 
     def clear(self) -> None:
         self.calls.clear()
@@ -120,6 +153,22 @@ class SubprocessBackend:
         cmd = self._build_dpms_cmd(state)
         await self._run_cmd(cmd)
 
+    async def async_query_idle_ms(self) -> int | None:
+        """X input idle time via `xprintidle`; None if it can't be read."""
+        try:
+            rc, out = await self._run_cmd(["xprintidle"])
+        except OSError:
+            return None
+        return parse_idle_ms(out) if rc == 0 else None
+
+    async def async_query_dpms_state(self) -> str | None:
+        """Current DPMS level via `xset q`; None if it can't be read."""
+        try:
+            rc, out = await self._run_cmd(["xset", "q"])
+        except OSError:
+            return None
+        return parse_dpms_state(out) if rc == 0 else None
+
     async def _run_cmd(self, cmd: list[str]) -> tuple[int, str]:
         """Run cmd; return (exit code, stripped stdout+stderr).
 
@@ -175,3 +224,9 @@ class SubprocessBackend:
 
     def set_dpms(self, state: str) -> None:
         pass  # Use async version in daemon
+
+    def query_idle_ms(self) -> int | None:
+        return None  # Use async version in daemon
+
+    def query_dpms_state(self) -> str | None:
+        return None  # Use async version in daemon

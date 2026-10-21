@@ -219,6 +219,15 @@ class FakeSubprocessBackend(SubprocessBackend):
     async def async_set_dpms(self, state) -> None:
         self.dpms_calls.append(state)
 
+    idle_ms: int | None = 0
+    dpms_state: str | None = "On"
+
+    async def async_query_idle_ms(self):
+        return self.idle_ms
+
+    async def async_query_dpms_state(self):
+        return self.dpms_state
+
     async def async_set_hw_brightness_parallel(self, displays, value):
         self.inflight += 1
         self.max_inflight = max(self.max_inflight, self.inflight)
@@ -870,3 +879,143 @@ class TestScreensaverLifecycle:
         except asyncio.TimeoutError:
             pass
         assert daemon._screensaver_task is None
+
+
+class TestReblankWhileLocked:
+    """While locked, monitors that woke with no input since get re-blanked.
+
+    Stray input (a jittery mouse sensor, a HID dongle) wakes DPMS while the
+    lock screen is up. Nothing else puts the monitors back to standby until
+    xidlehook's next lock, so they sit lit — showing the black lock screen —
+    for up to an hour.
+    """
+
+    @pytest.fixture
+    def locked(self, daemon, backend):
+        daemon._screensaver_active = True
+        daemon.config["screensaver_reblank_idle"] = 60
+        daemon.config["screensaver_dpms_mode"] = "standby"
+        backend.idle_ms = 61_000
+        backend.dpms_state = "On"
+        backend.clear()
+        return daemon
+
+    @pytest.mark.asyncio
+    async def test_lit_and_idle_forces_standby(self, locked, backend):
+        assert await locked._reblank_if_lit() is True
+        assert backend.calls == [("set_dpms", "standby")]
+
+    @pytest.mark.asyncio
+    async def test_uses_configured_dpms_mode(self, locked, backend):
+        locked.config["screensaver_dpms_mode"] = "off"
+        await locked._reblank_if_lit()
+        assert backend.calls == [("set_dpms", "off")]
+
+    @pytest.mark.asyncio
+    async def test_recent_input_leaves_monitors_alone(self, locked, backend):
+        """Someone is at the keyboard (e.g. typing the PIN) — don't blank."""
+        backend.idle_ms = 59_000
+        assert await locked._reblank_if_lit() is False
+        assert backend.calls == []
+
+    @pytest.mark.asyncio
+    async def test_already_in_standby_is_a_no_op(self, locked, backend):
+        backend.dpms_state = "Standby"
+        assert await locked._reblank_if_lit() is False
+        assert backend.calls == []
+
+    @pytest.mark.asyncio
+    async def test_unlocked_session_is_never_blanked(self, locked, backend):
+        locked._screensaver_active = False
+        assert await locked._reblank_if_lit() is False
+        assert backend.calls == []
+
+    @pytest.mark.asyncio
+    async def test_zero_threshold_disables(self, locked, backend):
+        locked.config["screensaver_reblank_idle"] = 0
+        assert await locked._reblank_if_lit() is False
+        assert backend.calls == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_idle_or_dpms_does_nothing(self, locked, backend):
+        """xprintidle/xset failing must not blank a possibly-in-use screen."""
+        backend.idle_ms = None
+        assert await locked._reblank_if_lit() is False
+        backend.idle_ms = 61_000
+        backend.dpms_state = None
+        assert await locked._reblank_if_lit() is False
+        assert backend.calls == []
+
+    @pytest.mark.asyncio
+    async def test_real_backend_path(self, tmp_dirs):
+        fake = FakeSubprocessBackend([[{"id": 1, "bus": 3}]])
+        fake.idle_ms = 120_000
+        fake.dpms_state = "On"
+        d = Daemon(
+            config_path=tmp_dirs["config_file"],
+            state_path=tmp_dirs["state_file"],
+            socket_path=tmp_dirs["socket_path"],
+            backend=fake,
+        )
+        d._screensaver_active = True
+        assert await d._reblank_if_lit() is True
+        assert fake.dpms_calls == ["standby"]
+
+    def test_defaults(self):
+        assert DEFAULT_CONFIG["screensaver_reblank_idle"] == 60
+        assert DEFAULT_CONFIG["screensaver_reblank_poll"] == 300
+
+    def test_next_check_waits_full_poll_by_default(self, locked):
+        locked.config["screensaver_reblank_poll"] = 300
+        assert locked._reblank_delay() == 300
+
+    @pytest.mark.asyncio
+    async def test_next_check_lands_when_idle_reaches_threshold(self, locked, backend):
+        """Woken 20 s ago: check again in 40 s, not a whole poll later."""
+        locked.config["screensaver_reblank_poll"] = 300
+        backend.idle_ms = 20_000
+        await locked._reblank_if_lit()
+        assert locked._reblank_delay() == pytest.approx(40)
+
+    @pytest.mark.asyncio
+    async def test_idle_past_threshold_waits_full_poll(self, locked, backend):
+        locked.config["screensaver_reblank_poll"] = 300
+        backend.idle_ms = 600_000
+        backend.dpms_state = "Standby"
+        await locked._reblank_if_lit()
+        assert locked._reblank_delay() == 300
+
+
+@pytest.mark.reblank_task
+class TestReblankTaskLifecycle:
+    """The re-blank poller runs only while the screensaver is active."""
+
+    @pytest.mark.asyncio
+    async def test_lock_starts_and_unlock_stops_task(self, daemon):
+        await daemon._on_screensaver_active(True)
+        task = daemon._reblank_task
+        assert task is not None and not task.done()
+        await daemon._on_screensaver_active(False)
+        assert daemon._reblank_task is None
+        await asyncio.sleep(0)
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_disabled_threshold_starts_no_task(self, daemon):
+        daemon.config["screensaver_reblank_idle"] = 0
+        await daemon._on_screensaver_active(True)
+        assert daemon._reblank_task is None
+
+    @pytest.mark.asyncio
+    async def test_loop_reblanks_after_poll(self, daemon, backend):
+        daemon.config["screensaver_reblank_poll"] = 0.01
+        backend.idle_ms = 61_000
+        backend.dpms_state = "On"
+        await daemon._on_screensaver_active(True)
+        backend.clear()
+        for _ in range(100):
+            if backend.calls:
+                break
+            await asyncio.sleep(0.01)
+        daemon._stop_reblank_task()
+        assert ("set_dpms", "standby") in backend.calls

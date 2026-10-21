@@ -53,6 +53,8 @@ class Daemon:
         self._last_luminance_log: datetime | None = None
         self._screensaver_task: asyncio.Task | None = None
         self._screensaver_watcher: ScreensaverWatcher | None = None
+        self._reblank_task: asyncio.Task | None = None
+        self._reblank_last_idle_ms: int | None = None
 
     def _save_state(self) -> None:
         save_state(self.state, self.state_path)
@@ -477,6 +479,79 @@ class Daemon:
             await self.backend.async_set_dpms(mode)
         else:
             self.backend.set_dpms(mode)
+        if active:
+            self._start_reblank_task()
+        else:
+            self._stop_reblank_task()
+
+    async def _reblank_if_lit(self) -> bool:
+        """Put monitors back to standby if they woke while locked and sat idle.
+
+        ActiveChanged fires once per lock, so a stray input event later in the
+        night (a jittery mouse sensor, a HID dongle) wakes DPMS and nothing
+        sends it back until xidlehook's next lock — the monitors sit lit,
+        showing the black lock screen. Acts only when the screensaver is
+        active, idle >= screensaver_reblank_idle, and DPMS reads "On"; any
+        reading that fails leaves the monitors alone. Returns True if it
+        forced the monitors down.
+        """
+        threshold = self.config["screensaver_reblank_idle"]
+        if not self._screensaver_active or threshold <= 0:
+            return False
+        real = isinstance(self.backend, SubprocessBackend)
+        idle_ms = await self.backend.async_query_idle_ms() if real else self.backend.query_idle_ms()
+        self._reblank_last_idle_ms = idle_ms
+        if idle_ms is None or idle_ms < threshold * 1000:
+            return False
+        dpms = await self.backend.async_query_dpms_state() if real else self.backend.query_dpms_state()
+        if dpms != "On":
+            return False
+        mode = self.config["screensaver_dpms_mode"]
+        if real:
+            await self.backend.async_set_dpms(mode)
+        else:
+            self.backend.set_dpms(mode)
+        print(f"brightness-ctl: monitors lit while locked, idle {idle_ms // 1000}s "
+              f"— forcing DPMS {mode}", file=sys.stderr, flush=True)
+        return True
+
+    def _reblank_delay(self) -> float:
+        """Seconds until the next re-blank check.
+
+        Normally the full poll interval. If the last check saw recent input
+        (idle below the threshold), check again the moment the threshold is
+        reached instead, so a wake caught early doesn't wait a second poll.
+        """
+        poll = self.config["screensaver_reblank_poll"]
+        idle_ms = self._reblank_last_idle_ms
+        threshold_ms = self.config["screensaver_reblank_idle"] * 1000
+        if idle_ms is not None and idle_ms < threshold_ms:
+            return min(poll, (threshold_ms - idle_ms) / 1000)
+        return poll
+
+    async def _reblank_loop(self) -> None:
+        """Run `_reblank_if_lit` for as long as the screensaver is active."""
+        self._reblank_last_idle_ms = None
+        while True:
+            await asyncio.sleep(self._reblank_delay())
+            try:
+                await self._reblank_if_lit()
+            except Exception as e:
+                self._reblank_last_idle_ms = None
+                print(f"brightness-ctl: re-blank check failed: {e}",
+                      file=sys.stderr, flush=True)
+
+    def _start_reblank_task(self) -> None:
+        """Start the locked-screen re-blank poller (no-op when disabled)."""
+        self._stop_reblank_task()
+        if self.config["screensaver_reblank_idle"] > 0:
+            self._reblank_task = asyncio.create_task(self._reblank_loop())
+
+    def _stop_reblank_task(self) -> None:
+        """Cancel the re-blank poller if running."""
+        if self._reblank_task is not None:
+            self._reblank_task.cancel()
+            self._reblank_task = None
 
     def _start_screensaver_task(self) -> None:
         """Start the Cinnamon ScreenSaver ActiveChanged watcher."""
@@ -725,6 +800,7 @@ class Daemon:
             except asyncio.CancelledError:
                 pass
             self._stop_screensaver_task()
+            self._stop_reblank_task()
             server.close()
             await server.wait_closed()
             if self.socket_path.exists():

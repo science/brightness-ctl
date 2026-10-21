@@ -44,6 +44,13 @@ DEFAULT_CONFIG = {
     # reliably after suspend/resume on some GPUs).
     "screensaver_monitor_off": True,
     "screensaver_dpms_mode": "standby",
+    # While locked, if the monitors are back On (stray input woke them) and
+    # there has been no input for this many seconds, drive them back to
+    # screensaver_dpms_mode. 0 disables. Checked every _poll seconds, so a
+    # stray wake stays lit for at most that long; kept coarse so an idle
+    # desktop isn't woken every few seconds overnight.
+    "screensaver_reblank_idle": 60,
+    "screensaver_reblank_poll": 300,
 }
 
 # Keys that are strings (not ints) in the config

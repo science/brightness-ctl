@@ -35,3 +35,22 @@ def _stub_ambient_task(monkeypatch):
     monkeypatch.setattr(
         daemon_module.Daemon, "_start_ambient_task", lambda self: None
     )
+
+
+@pytest.fixture(autouse=True)
+def _stub_reblank_task(request, monkeypatch):
+    """Keep `_on_screensaver_active(True)` from leaving a poller task behind.
+
+    The re-blank poller sleeps between checks, so any test that locks without
+    unlocking would leave it pending when the event loop closes. Tests marked
+    `reblank_task` exercise the real task lifecycle.
+    """
+    if request.node.get_closest_marker("reblank_task"):
+        return
+    try:
+        import daemon as daemon_module
+    except ImportError:
+        return
+    monkeypatch.setattr(
+        daemon_module.Daemon, "_start_reblank_task", lambda self: None
+    )

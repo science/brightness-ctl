@@ -8,12 +8,13 @@ Color temperature and brightness daemon for X11/Cinnamon desktops. Python asynci
 - **Software brightness**: `gammastep` one-shot (GPU-based, fast).
 - **Hardware brightness**: `ddcutil` DDC/CI (monitor backlight).
 - **Ambient auto-brightness** (optional): reads a USB camera every 60s, calibrates against a 7-day rolling window of luminance samples (≥30 readings required), and drives monitor brightness to track the room. Manual hotkey adjustments are honored — the daemon back-computes the anchor so the ambient loop doesn't fight the user. Survives suspend/resume and USB hotplugs — the daemon reopens the camera when the fd goes stale.
+- **Monitors off while locked**: on Cinnamon `ScreenSaver.ActiveChanged` the daemon drives DPMS to `screensaver_dpms_mode` (standby). While the lock screen stays up it checks every 5 min, and if stray input woke the monitors and nothing has touched them for 60 s, it sends them back to standby. A stray wake therefore stays lit for at most about 5 min. Each forced re-blank logs one line to the journal.
 - **Camera-safety interlock**: devices are selected by USB VID:PID, never by `/dev/videoN` number (those flip across reboots). A hard blocklist refuses to open known meeting cameras even if explicitly configured.
 
 ## Requirements
 
 - Python 3.12+ (stdlib only — no pip/venv at runtime)
-- `gammastep`, `ddcutil`, `libnotify-bin` (system packages)
+- `gammastep`, `ddcutil`, `libnotify-bin`, `xprintidle`, `x11-xserver-utils` (system packages; the last two provide the idle-time and `xset` DPMS queries)
 - X11 with RandR (Cinnamon, MATE, XFCE, …)
 - An ambient-light sensor for auto-brightness (optional). Currently tuned for the Alcor Micro 058f:5608 module; other UVC cameras work but may need `camera_brightness` tweaked per sensor.
 
@@ -88,6 +89,12 @@ autobrightness_interval = 60    # seconds between camera reads
 autobrightness_range = 40       # max deviation from anchor, 0..200 scale
 luminance_log_interval = 1800   # seconds between log writes (default 30min)
 calibration_lookback_days = 7
+
+# Monitors off while locked
+screensaver_monitor_off = true  # drive DPMS on lock/unlock
+screensaver_dpms_mode = "standby"
+screensaver_reblank_idle = 60   # re-blank a woken, untouched lock screen after N s; 0 = off
+screensaver_reblank_poll = 300  # seconds between those checks while locked
 ```
 
 ## Development

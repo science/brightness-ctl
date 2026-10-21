@@ -204,3 +204,34 @@ class TestDpms:
         from hardware import SubprocessBackend
         cmd = SubprocessBackend._build_dpms_cmd("on")
         assert cmd == ["xset", "dpms", "force", "on"]
+
+
+class TestParseDpmsState:
+    """`xset q` → the DPMS power level, or None."""
+
+    def test_on(self):
+        from hardware import parse_dpms_state
+        out = "DPMS (Display Power Management Signaling):\n  Standby: 0    Suspend: 0    Off: 0\n  DPMS is Enabled\n  Monitor is On\n"
+        assert parse_dpms_state(out) == "On"
+
+    def test_standby_suspend_off(self):
+        from hardware import parse_dpms_state
+        assert parse_dpms_state("  Monitor is in Standby\n") == "Standby"
+        assert parse_dpms_state("  Monitor is in Suspend\n") == "Suspend"
+        assert parse_dpms_state("  Monitor is Off\n") == "Off"
+
+    def test_dpms_disabled_has_no_state(self):
+        from hardware import parse_dpms_state
+        assert parse_dpms_state("  DPMS is Disabled\n") is None
+        assert parse_dpms_state("") is None
+
+
+class TestParseIdleMs:
+    def test_parses_xprintidle_output(self):
+        from hardware import parse_idle_ms
+        assert parse_idle_ms("61234\n") == 61234
+
+    def test_garbage_is_none(self):
+        from hardware import parse_idle_ms
+        assert parse_idle_ms("") is None
+        assert parse_idle_ms("couldn't open display") is None
