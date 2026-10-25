@@ -55,6 +55,9 @@ class Daemon:
         self._screensaver_watcher: ScreensaverWatcher | None = None
         self._reblank_task: asyncio.Task | None = None
         self._reblank_last_idle_ms: int | None = None
+        self._soft_blanked = False
+        self._blank_task: asyncio.Task | None = None
+        self._unlock_hook_task: asyncio.Task | None = None
 
     def _save_state(self) -> None:
         save_state(self.state, self.state_path)
@@ -74,7 +77,22 @@ class Daemon:
         return sw / 100.0
 
     async def apply(self) -> None:
-        """Apply current color temperature + software brightness."""
+        """Apply current color temperature + software brightness.
+
+        While soft-blanked, SW brightness is replaced by the blank level (and
+        a disabled colour shift dims at neutral 6500K instead of resetting),
+        so every apply path — including the 30 s periodic one — keeps it.
+        """
+        if self._soft_blanked:
+            _, applied = self._get_applied_temp()
+            temp = applied if self.state.enabled else 6500
+            level = max(self.config["soft_blank_level"], 10)
+            sw_dec = self._sw_to_decimal(level)
+            if isinstance(self.backend, SubprocessBackend):
+                await self.backend.async_apply_color_temp(temp, sw_dec, self.config["method"])
+            else:
+                self.backend.apply_color_temp(temp, sw_dec, self.config["method"])
+            return
         if not self.state.enabled:
             if isinstance(self.backend, SubprocessBackend):
                 await self.backend.async_reset_color_temp(self.config["method"])
@@ -328,7 +346,19 @@ class Daemon:
                 "hw_brightness": self.state.hw_brightness,
                 "day_temp": self.config["day_temp"],
                 "night_temp": self.config["night_temp"],
+                "soft_blanked": self._soft_blanked,
             }
+
+        elif cmd == "blank":
+            return await self._handle_blank()
+
+        elif cmd == "unblank":
+            await self._unblank("command")
+            return {"status": "ok", "soft_blanked": False}
+
+        elif cmd == "apply":
+            await self.apply()
+            return {"status": "ok"}
 
         elif cmd == "auto-on":
             return await self._handle_auto_on()
@@ -471,18 +501,136 @@ class Daemon:
             self._ambient_task.cancel()
             self._ambient_task = None
 
+    async def _handle_blank(self) -> dict:
+        """Soft-blank: dim every monitor until input, lock/unlock, or timeout.
+
+        Ignored while locked: the monitors are in DPMS standby already and
+        the unlock prompt should be readable when they wake.
+        """
+        if self._screensaver_active:
+            print("brightness-ctl: soft-blank ignored — screen is locked",
+                  file=sys.stderr, flush=True)
+            return {"status": "ok", "soft_blanked": False, "message": "locked"}
+        if not self._soft_blanked:
+            self._soft_blanked = True
+            await self.apply()
+            self._start_blank_watch()
+            print("brightness-ctl: soft-blank on", file=sys.stderr, flush=True)
+        return {"status": "ok", "soft_blanked": True}
+
+    async def _unblank(self, reason: str) -> None:
+        """Lift the soft-blank (no-op when not blanked)."""
+        if not self._soft_blanked:
+            return
+        self._soft_blanked = False
+        self._stop_blank_watch()
+        await self.apply()
+        print(f"brightness-ctl: soft-blank off ({reason})", file=sys.stderr, flush=True)
+
+    async def _query_idle_ms(self) -> int | None:
+        if isinstance(self.backend, SubprocessBackend):
+            return await self.backend.async_query_idle_ms()
+        return self.backend.query_idle_ms()
+
+    async def _blank_watch_loop(self) -> None:
+        """Unblank on input (X idle time went down) or after soft_blank_max.
+
+        An unreadable idle time is skipped rather than treated as input, so
+        a flaky xprintidle can only end the blank via the timeout.
+        """
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        last = await self._query_idle_ms()
+        while self._soft_blanked:
+            await asyncio.sleep(self.config["soft_blank_poll"])
+            if loop.time() - started >= self.config["soft_blank_max"]:
+                reason = "timeout"
+                break
+            try:
+                idle = await self._query_idle_ms()
+            except Exception as e:
+                print(f"brightness-ctl: soft-blank idle check failed: {e}",
+                      file=sys.stderr, flush=True)
+                continue
+            if idle is None:
+                continue
+            if last is not None and idle < last:
+                reason = "input"
+                break
+            last = idle
+        else:
+            return
+        self._blank_task = None     # don't let _unblank cancel this task
+        await self._unblank(reason)
+
+    def _start_blank_watch(self) -> None:
+        self._stop_blank_watch()
+        self._blank_task = asyncio.create_task(self._blank_watch_loop())
+
+    def _stop_blank_watch(self) -> None:
+        if self._blank_task is not None:
+            self._blank_task.cancel()
+            self._blank_task = None
+
+    async def _run_unlock_hook(self, argv: list[str]) -> None:
+        """Run the unlock hook once; log the outcome, never raise."""
+        await asyncio.sleep(self.config["unlock_hook_delay"])
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as e:
+            print(f"brightness-ctl: unlock hook failed to start: {e}",
+                  file=sys.stderr, flush=True)
+            return
+        try:
+            _, err = await asyncio.wait_for(
+                proc.communicate(), timeout=self.config["unlock_hook_timeout"],
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            print(f"brightness-ctl: unlock hook timed out after "
+                  f"{self.config['unlock_hook_timeout']}s, killed",
+                  file=sys.stderr, flush=True)
+        else:
+            tail = err.decode(errors="replace").strip().splitlines()[-1:] if err else []
+            print(f"brightness-ctl: unlock hook exited {proc.returncode}"
+                  + (f": {tail[0]}" if tail and proc.returncode else ""),
+                  file=sys.stderr, flush=True)
+        # A mode set can reset the gamma ramp; put colour temp back now
+        # rather than at the next periodic apply.
+        await self.apply()
+
+    def _start_unlock_hook(self) -> None:
+        argv = self.config["unlock_hook"]
+        if not argv:
+            return
+        if self._unlock_hook_task is not None and not self._unlock_hook_task.done():
+            print("brightness-ctl: unlock hook still running — skipped",
+                  file=sys.stderr, flush=True)
+            return
+        self._unlock_hook_task = asyncio.create_task(self._run_unlock_hook(list(argv)))
+
     async def _on_screensaver_active(self, active: bool) -> None:
-        """ScreenSaver.ActiveChanged callback — drive DPMS state."""
+        """ScreenSaver.ActiveChanged callback — drive DPMS state.
+
+        Lock and unlock both lift any soft-blank. Unlock also starts the
+        unlock hook (after DPMS is back on).
+        """
         self._screensaver_active = active
         mode = self.config["screensaver_dpms_mode"] if active else "on"
         if isinstance(self.backend, SubprocessBackend):
             await self.backend.async_set_dpms(mode)
         else:
             self.backend.set_dpms(mode)
+        await self._unblank("lock" if active else "unlock")
         if active:
             self._start_reblank_task()
         else:
             self._stop_reblank_task()
+            self._start_unlock_hook()
 
     async def _reblank_if_lit(self) -> bool:
         """Put monitors back to standby if they woke while locked and sat idle.
@@ -801,6 +949,7 @@ class Daemon:
                 pass
             self._stop_screensaver_task()
             self._stop_reblank_task()
+            self._stop_blank_watch()
             server.close()
             await server.wait_closed()
             if self.socket_path.exists():

@@ -9,6 +9,8 @@ Color temperature and brightness daemon for X11/Cinnamon desktops. Python asynci
 - **Hardware brightness**: `ddcutil` DDC/CI (monitor backlight).
 - **Ambient auto-brightness** (optional): reads a USB camera every 60s, calibrates against a 7-day rolling window of luminance samples (≥30 readings required), and drives monitor brightness to track the room. Manual hotkey adjustments are honored — the daemon back-computes the anchor so the ambient loop doesn't fight the user. Survives suspend/resume and USB hotplugs — the daemon reopens the camera when the fd goes stale.
 - **Monitors off while locked**: on Cinnamon `ScreenSaver.ActiveChanged` the daemon drives DPMS to `screensaver_dpms_mode` (standby). While the lock screen stays up it checks every 5 min, and if stray input woke the monitors and nothing has touched them for 60 s, it sends them back to standby. A stray wake therefore stays lit for at most about 5 min. Each forced re-blank logs one line to the journal.
+- **Soft-blank** (`blank`): dims every monitor to 10% through the same gammastep apply, as a warning before an idle lock. The periodic re-apply keeps it, and it lifts itself on any input, on lock or unlock, or after 10 min, so it can't get stuck dark even if nobody sends `unblank`. It never touches RandR: on NVIDIA an `xrandr --brightness` call is a full mode set, which some monitors fail to resync from.
+- **Unlock hook**: after every unlock (DPMS back on, plus `unlock_hook_delay` seconds) the daemon runs `unlock_hook`, then re-applies gamma. On linux-bambam that is `~/bin/monitor-relink`, which re-establishes the HDMI link of a monitor that sometimes stays backlit black after a DPMS cycle.
 - **Camera-safety interlock**: devices are selected by USB VID:PID, never by `/dev/videoN` number (those flip across reboots). A hard blocklist refuses to open known meeting cameras even if explicitly configured.
 
 ## Requirements
@@ -42,6 +44,9 @@ brightness-ctl reset           # Reset color offset to zero
 # Brightness
 brightness-ctl bright-up       # Increase brightness (SW first, then HW)
 brightness-ctl bright-down     # Decrease brightness (HW first, then SW)
+brightness-ctl blank           # Soft-blank (dim to soft_blank_level) until input/lock/timeout
+brightness-ctl unblank         # Lift the soft-blank now
+brightness-ctl apply           # Re-apply colour temp + SW brightness (after a mode set)
 
 # Ambient auto-brightness
 brightness-ctl auto-on         # Start the camera loop, anchor at current brightness
@@ -95,6 +100,16 @@ screensaver_monitor_off = true  # drive DPMS on lock/unlock
 screensaver_dpms_mode = "standby"
 screensaver_reblank_idle = 60   # re-blank a woken, untouched lock screen after N s; 0 = off
 screensaver_reblank_poll = 300  # seconds between those checks while locked
+
+# Soft-blank (pre-lock warning)
+soft_blank_level = 10           # SW brightness % while blanked (gammastep minimum is 10)
+soft_blank_max = 600            # lift the blank after N s regardless
+soft_blank_poll = 1             # seconds between input checks while blanked
+
+# Unlock hook
+unlock_hook = []                # argv run after every unlock, e.g. ["/home/steve/bin/monitor-relink"]
+unlock_hook_delay = 2           # seconds after DPMS-on before running it
+unlock_hook_timeout = 30        # kill it after N s
 ```
 
 ## Development

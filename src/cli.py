@@ -40,6 +40,7 @@ def format_status(resp: dict) -> str:
         f"Night temp:  {resp.get('night_temp', '?')}K",
         f"HW bright:   {resp.get('hw_brightness', '?')}%",
         f"SW bright:   {resp.get('sw_brightness', 100) / 100:.2f}",
+        f"Soft blank:  {'on' if resp.get('soft_blanked') else 'off'}",
     ]
     return "\n".join(lines)
 
@@ -80,6 +81,9 @@ def main(socket_path: str, args: list[str]) -> int:
         print("Brightness:")
         print("  bright-up   (bu) Increase brightness (SW up to 1.0, then HW)")
         print("  bright-down (bd) Decrease brightness (HW down to 0%, then SW)")
+        print("  blank            Soft-blank (dim) until input, lock or timeout")
+        print("  unblank          Lift the soft-blank now")
+        print("  apply            Re-apply colour temp + SW brightness")
         print()
         print("Auto-brightness:")
         print("  auto-on         (ao)  Enable, set anchor from current brightness")

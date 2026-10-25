@@ -127,7 +127,7 @@ All state lives in memory; written to `~/.config/brightness-ctl/state.json` on m
 
 Hotkey presses invoke `brightness-ctl warmer` etc. The entry point connects to the daemon socket, sends a JSON command, reads the response, and exits. Latency target: <50ms total.
 
-Commands: `daemon`, `status`, `stop`, `warmer`, `cooler`, `toggle`, `reset`, `bright-up`, `bright-down`, plus the auto-brightness family: `auto-on`, `auto-off`, `auto-status`, `auto-calibrate`, `auto-set-cal`, `auto-reset-cal`. All go through the same socket protocol and are dispatched in `daemon.py`. `auto-set-cal <min> <max>` is the only parameterized command — it sends an `"args"` key alongside `"cmd"` in the JSON request.
+Commands: `daemon`, `status`, `stop`, `warmer`, `cooler`, `toggle`, `reset`, `bright-up`, `bright-down`, `blank`, `unblank`, `apply`, plus the auto-brightness family: `auto-on`, `auto-off`, `auto-status`, `auto-calibrate`, `auto-set-cal`, `auto-reset-cal`. All go through the same socket protocol and are dispatched in `daemon.py`. `auto-set-cal <min> <max>` is the only parameterized command — it sends an `"args"` key alongside `"cmd"` in the JSON request.
 
 ### Hardware Backend
 
@@ -142,6 +142,19 @@ All external tool calls go through a `HardwareBackend` protocol:
 **Monitor reinventory after hotkey bursts.** `ddcutil detect` lists a powered-off (but still cabled) monitor as `Invalid display`, so it drops out of `_displays`, and successful writes to the remaining monitors never re-add it. Each `bright-up`/`bright-down` (re)arms a timer `hw_redetect_delay` seconds (default 15) after the most recent press; when it fires, `_redetect_displays` re-runs detect under `_hw_lock` and writes the current brightness to any newly found monitor. The delay is deliberately long: hotkey presses come in 1–2s bursts with pauses to judge brightness, and a press landing during the ~1s detect has its write delayed. Skipped while the screensaver is active (DPMS standby can make detect drop every monitor). Only hotkey presses schedule it — not the ambient loop.
 
 Monitor names differ between layers on this NVIDIA host: Cinnamon's Display applet shows X RandR output names (e.g. `DP-4`), while ddcutil shows kernel DRM connector names (e.g. `card1-DP-3`) for the same monitor. Map them by EDID serial, never by name.
+
+### Soft-blank and the unlock hook
+
+**Soft-blank** (`blank`/`unblank`, driven by `~/bin/screen-soft` from xidlehook's 25-min timer). `_soft_blanked` is transient, in memory only, never in `state.json`. While it is set, `apply()` substitutes `soft_blank_level` for SW brightness, floored at 10 because gammastep rejects lower values. A disabled colour shift dims at 6500K instead of resetting. Because the 30 s `periodic_apply` goes through `apply()`, it keeps the blank. Before this, the external `xrandr --brightness 0` blank was wiped within 30 s.
+
+`_blank_watch_loop` lifts the blank on input, meaning the X idle time went down (polled every `soft_blank_poll`), or after `soft_blank_max`. An unreadable idle time is skipped, not treated as input. Lock and unlock also lift it, and `blank` is ignored while locked. The blank deliberately never depends on xidlehook calling `unblank`: xidlehook 0.10 only runs the canceller of the most recently fired timer. Never reintroduce RandR writes for this. On NVIDIA every `xrandr --output X --brightness` is a full mode set (three outputs means three mode sets in 400 ms), and the bambam ASUS VP249 sometimes stays backlit black after one.
+
+**Unlock hook** (`unlock_hook`, an argv list, default empty). It runs on `ActiveChanged(false)`:
+1. after `xset dpms force on`, plus `unlock_hook_delay` seconds;
+2. as an async subprocess, killed after `unlock_hook_timeout`, with its exit status logged to stderr;
+3. followed by `apply()`, because a mode set can reset the gamma ramp.
+
+A second unlock while the hook is still running is skipped. On bambam the hook is `~/bin/monitor-relink` (yadm), a 60 → 59.94 → 60 Hz flip on HDMI-0.
 
 ### Camera (V4L2)
 

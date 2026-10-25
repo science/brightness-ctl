@@ -51,6 +51,22 @@ DEFAULT_CONFIG = {
     # desktop isn't woken every few seconds overnight.
     "screensaver_reblank_idle": 60,
     "screensaver_reblank_poll": 300,
+    # Soft-blank (`blank` command, the pre-lock warning): SW brightness in
+    # percent while blanked, floored at gammastep's 10% minimum. It lifts
+    # itself on any input (idle time drops; checked every _poll seconds), on
+    # lock/unlock, or after _max seconds — it never depends on a caller
+    # remembering to send `unblank`.
+    "soft_blank_level": 10,
+    "soft_blank_max": 600,
+    "soft_blank_poll": 1,
+    # Command (argv list) run after every unlock, once DPMS is back on and
+    # _delay seconds have passed; killed after _timeout seconds. Empty = off.
+    # On linux-bambam it is ~/bin/monitor-relink, which re-establishes the
+    # right monitor's HDMI link (the ASUS VP249 sometimes stays backlit
+    # black after a DPMS cycle or mode set).
+    "unlock_hook": [],
+    "unlock_hook_delay": 2,
+    "unlock_hook_timeout": 30,
 }
 
 # Keys that are strings (not ints) in the config

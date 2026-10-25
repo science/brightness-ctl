@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import textwrap
 from pathlib import Path
 
@@ -1019,3 +1020,261 @@ class TestReblankTaskLifecycle:
             await asyncio.sleep(0.01)
         daemon._stop_reblank_task()
         assert ("set_dpms", "standby") in backend.calls
+
+
+class TestSoftBlank:
+    """`blank` dims every monitor through the normal gammastep apply path.
+
+    xrandr --brightness (the old screen-soft) does a full NVIDIA mode set per
+    output, and the ASUS VP249 sometimes never resyncs after one. It was also
+    undone by the 30 s periodic apply within seconds. The daemon owns the
+    blank now, so both apply paths honour it and nothing touches RandR.
+    """
+
+    def _sw_values(self, backend):
+        return [c[2] for c in backend.calls if c[0] == "apply_color_temp"]
+
+    @pytest.mark.asyncio
+    async def test_blank_applies_blank_level(self, daemon, backend):
+        daemon.state.sw_brightness = 100
+        resp = await daemon.handle_command({"cmd": "blank"})
+        assert resp["status"] == "ok" and resp["soft_blanked"] is True
+        assert self._sw_values(backend)[-1] == pytest.approx(0.10)
+        daemon._stop_blank_watch()
+
+    @pytest.mark.asyncio
+    async def test_periodic_apply_keeps_the_blank(self, daemon, backend):
+        """The 30 s re-apply used to wipe the blank; it must preserve it."""
+        await daemon.handle_command({"cmd": "blank"})
+        backend.clear()
+        await daemon.apply()
+        assert self._sw_values(backend) == [pytest.approx(0.10)]
+        daemon._stop_blank_watch()
+
+    @pytest.mark.asyncio
+    async def test_unblank_restores_sw_brightness(self, daemon, backend):
+        daemon.state.sw_brightness = 85
+        await daemon.handle_command({"cmd": "blank"})
+        resp = await daemon.handle_command({"cmd": "unblank"})
+        assert resp["soft_blanked"] is False
+        assert self._sw_values(backend)[-1] == pytest.approx(0.85)
+        assert daemon._blank_task is None
+
+    @pytest.mark.asyncio
+    async def test_blank_never_changes_saved_brightness(self, daemon, tmp_dirs):
+        """The blank is transient: a daemon restart must come back unblanked."""
+        daemon.state.sw_brightness = 70
+        await daemon.handle_command({"cmd": "blank"})
+        assert daemon.state.sw_brightness == 70
+        assert not tmp_dirs["state_file"].exists() or \
+            json.loads(tmp_dirs["state_file"].read_text())["sw_brightness"] == 70
+        daemon._stop_blank_watch()
+
+    @pytest.mark.asyncio
+    async def test_blank_level_is_clamped_to_gammastep_minimum(self, daemon, backend):
+        daemon.config["soft_blank_level"] = 0
+        await daemon.handle_command({"cmd": "blank"})
+        assert self._sw_values(backend)[-1] == pytest.approx(0.10)
+        daemon._stop_blank_watch()
+
+    @pytest.mark.asyncio
+    async def test_blank_while_disabled_still_dims(self, daemon, backend):
+        """Colour shift toggled off: dim at neutral temp instead of a reset."""
+        daemon.state.enabled = False
+        await daemon.handle_command({"cmd": "blank"})
+        last = [c for c in backend.calls if c[0] == "apply_color_temp"][-1]
+        assert last[1] == 6500 and last[2] == pytest.approx(0.10)
+        daemon._stop_blank_watch()
+
+    @pytest.mark.asyncio
+    async def test_blank_while_locked_is_ignored(self, daemon, backend):
+        """Locked: monitors are in standby and the unlock prompt must be readable."""
+        daemon._screensaver_active = True
+        resp = await daemon.handle_command({"cmd": "blank"})
+        assert resp["soft_blanked"] is False
+        assert daemon._soft_blanked is False
+        assert daemon._blank_task is None
+
+    @pytest.mark.asyncio
+    async def test_lock_clears_blank(self, daemon, backend):
+        await daemon.handle_command({"cmd": "blank"})
+        await daemon._on_screensaver_active(True)
+        assert daemon._soft_blanked is False
+        assert daemon._blank_task is None
+
+    @pytest.mark.asyncio
+    async def test_unlock_clears_blank(self, daemon, backend):
+        await daemon.handle_command({"cmd": "blank"})
+        await daemon._on_screensaver_active(False)
+        assert daemon._soft_blanked is False
+
+    @pytest.mark.asyncio
+    async def test_status_reports_blank(self, daemon):
+        assert (await daemon.handle_command({"cmd": "status"}))["soft_blanked"] is False
+        await daemon.handle_command({"cmd": "blank"})
+        assert (await daemon.handle_command({"cmd": "status"}))["soft_blanked"] is True
+        daemon._stop_blank_watch()
+
+    def test_defaults(self):
+        assert DEFAULT_CONFIG["soft_blank_level"] == 10
+        assert DEFAULT_CONFIG["soft_blank_max"] == 600
+        assert DEFAULT_CONFIG["soft_blank_poll"] == 1
+
+
+class TestSoftBlankSelfHeal:
+    """The blank lifts itself; it never depends on xidlehook's canceller.
+
+    xidlehook 0.10 only runs the canceller of the last timer that fired, so
+    once the lock timer has fired `screen-soft restore` never runs.
+    """
+
+    @pytest.fixture
+    def fast(self, daemon, backend):
+        daemon.config["soft_blank_poll"] = 0.01
+        backend.idle_ms = 1_500_000
+        return daemon
+
+    async def _wait_unblanked(self, daemon, tries=200):
+        for _ in range(tries):
+            if not daemon._soft_blanked:
+                return True
+            await asyncio.sleep(0.01)
+        return False
+
+    @pytest.mark.asyncio
+    async def test_input_unblanks(self, fast, backend):
+        await fast.handle_command({"cmd": "blank"})
+        await asyncio.sleep(0.03)
+        assert fast._soft_blanked is True       # still idle, still blanked
+        backend.idle_ms = 200                   # someone touched the mouse
+        assert await self._wait_unblanked(fast)
+        assert fast._blank_task is None
+
+    @pytest.mark.asyncio
+    async def test_growing_idle_keeps_blank(self, fast, backend):
+        await fast.handle_command({"cmd": "blank"})
+        for step in range(5):
+            backend.idle_ms += 10
+            await asyncio.sleep(0.02)
+        assert fast._soft_blanked is True
+        fast._stop_blank_watch()
+
+    @pytest.mark.asyncio
+    async def test_max_duration_unblanks(self, fast, backend):
+        fast.config["soft_blank_max"] = 0.05
+        await fast.handle_command({"cmd": "blank"})
+        assert await self._wait_unblanked(fast)
+
+    @pytest.mark.asyncio
+    async def test_unreadable_idle_does_not_unblank_early(self, fast, backend):
+        backend.idle_ms = None
+        await fast.handle_command({"cmd": "blank"})
+        await asyncio.sleep(0.05)
+        assert fast._soft_blanked is True
+        fast._stop_blank_watch()
+
+
+class TestApplyCommand:
+    """`apply` re-applies gamma, e.g. after monitor-relink's mode set."""
+
+    @pytest.mark.asyncio
+    async def test_apply_command_reapplies(self, daemon, backend):
+        resp = await daemon.handle_command({"cmd": "apply"})
+        assert resp["status"] == "ok"
+        assert backend.calls and backend.calls[-1][0] == "apply_color_temp"
+
+
+class TestUnlockHook:
+    """On unlock, run the configured command (monitor-relink on bambam)."""
+
+    def _hook(self, tmp_path, body="pass"):
+        marker = tmp_path / "hook-ran"
+        script = f"import pathlib; {body}; pathlib.Path({str(marker)!r}).write_text('x')"
+        return marker, [sys.executable, "-c", script]
+
+    async def _drain(self, daemon):
+        task = daemon._unlock_hook_task
+        if task is not None:
+            await asyncio.wait_for(task, timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_runs_on_unlock_after_dpms_on(self, daemon, backend, tmp_path):
+        marker, argv = self._hook(tmp_path)
+        daemon.config["unlock_hook"] = argv
+        daemon.config["unlock_hook_delay"] = 0
+        await daemon._on_screensaver_active(False)
+        assert ("set_dpms", "on") in backend.calls
+        await self._drain(daemon)
+        assert marker.exists()
+
+    @pytest.mark.asyncio
+    async def test_reapplies_gamma_after_hook(self, daemon, backend, tmp_path):
+        marker, argv = self._hook(tmp_path)
+        daemon.config["unlock_hook"] = argv
+        daemon.config["unlock_hook_delay"] = 0
+        await daemon._on_screensaver_active(False)
+        backend.clear()
+        await self._drain(daemon)
+        assert backend.calls and backend.calls[-1][0] == "apply_color_temp"
+
+    @pytest.mark.asyncio
+    async def test_not_run_on_lock(self, daemon, tmp_path):
+        marker, argv = self._hook(tmp_path)
+        daemon.config["unlock_hook"] = argv
+        await daemon._on_screensaver_active(True)
+        assert daemon._unlock_hook_task is None
+        assert not marker.exists()
+
+    @pytest.mark.asyncio
+    async def test_empty_hook_runs_nothing(self, daemon):
+        daemon.config["unlock_hook"] = []
+        await daemon._on_screensaver_active(False)
+        assert daemon._unlock_hook_task is None
+
+    @pytest.mark.asyncio
+    async def test_waits_for_delay(self, daemon, tmp_path):
+        marker, argv = self._hook(tmp_path)
+        daemon.config["unlock_hook"] = argv
+        daemon.config["unlock_hook_delay"] = 0.3
+        await daemon._on_screensaver_active(False)
+        await asyncio.sleep(0.1)
+        assert not marker.exists()
+        await self._drain(daemon)
+        assert marker.exists()
+
+    @pytest.mark.asyncio
+    async def test_failing_hook_is_tolerated(self, daemon, tmp_path):
+        daemon.config["unlock_hook"] = [sys.executable, "-c", "raise SystemExit(3)"]
+        daemon.config["unlock_hook_delay"] = 0
+        await daemon._on_screensaver_active(False)
+        await self._drain(daemon)   # must not raise
+
+    @pytest.mark.asyncio
+    async def test_missing_executable_is_tolerated(self, daemon):
+        daemon.config["unlock_hook"] = ["/nonexistent/monitor-relink"]
+        daemon.config["unlock_hook_delay"] = 0
+        await daemon._on_screensaver_active(False)
+        await self._drain(daemon)
+
+    @pytest.mark.asyncio
+    async def test_hung_hook_is_killed_at_timeout(self, daemon):
+        daemon.config["unlock_hook"] = [sys.executable, "-c", "import time; time.sleep(30)"]
+        daemon.config["unlock_hook_delay"] = 0
+        daemon.config["unlock_hook_timeout"] = 0.2
+        await daemon._on_screensaver_active(False)
+        await asyncio.wait_for(daemon._unlock_hook_task, timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_overlapping_unlock_skips_second_run(self, daemon, tmp_path):
+        daemon.config["unlock_hook"] = [sys.executable, "-c", "import time; time.sleep(0.3)"]
+        daemon.config["unlock_hook_delay"] = 0
+        await daemon._on_screensaver_active(False)
+        first = daemon._unlock_hook_task
+        await daemon._on_screensaver_active(False)
+        assert daemon._unlock_hook_task is first
+        await self._drain(daemon)
+
+    def test_defaults(self):
+        assert DEFAULT_CONFIG["unlock_hook"] == []
+        assert DEFAULT_CONFIG["unlock_hook_delay"] == 2
+        assert DEFAULT_CONFIG["unlock_hook_timeout"] == 30
