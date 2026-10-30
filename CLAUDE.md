@@ -154,7 +154,7 @@ Monitor names differ between layers on this NVIDIA host: Cinnamon's Display appl
 2. as an async subprocess, killed after `unlock_hook_timeout`, with its exit status logged to stderr;
 3. followed by `apply()`, because a mode set can reset the gamma ramp.
 
-A second unlock while the hook is still running is skipped. On bambam the hook is `~/bin/monitor-relink` (yadm), a 60 → 59.94 → 60 Hz flip on HDMI-0.
+A second unlock while the hook is still running is skipped. bambam ran `~/bin/monitor-relink` (yadm, a 60 → 59.94 → 60 Hz flip on HDMI-0) here from 2026-10-24 to 10-30. It is now empty there: each run is a mode set, and Firefox tearing followed unlocks. monitor-relink is manual only (Super+Shift+M).
 
 ### Camera (V4L2)
 
